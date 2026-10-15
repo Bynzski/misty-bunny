@@ -81,6 +81,41 @@ if (html) {
   ok('the document is not the deployment-pending page', !/deployment pending/i.test(html));
   const canonical = (html.match(/<link[^>]+rel=["']canonical["'][^>]*href=["']([^"']+)["']/i) || [])[1] || '';
   if (IS_PRODUCTION) ok('the canonical URL is the production URL', canonical === SITE, canonical);
+
+  // The social card, over the public hostname.
+  //
+  // This is the one asset that is fetched by somebody else's crawler, from a
+  // different network, with no knowledge of the release. Asserting the tag is
+  // present proves nothing on its own — a card that 404s is exactly the bug
+  // this whole block exists to catch, so the URL in the tag is fetched here
+  // and has to come back as a real image.
+  const ogImage = (html.match(/<meta[^>]+property=["']og:image["'][^>]*content=["']([^"']+)["']/i) || [])[1] || '';
+  ok('the document declares an og:image', !!ogImage, ogImage || '(none)');
+  ok('og:image is an absolute URL', /^https?:\/\//i.test(ogImage), ogImage || '(none)');
+  if (ogImage) {
+    try {
+      const r = await fetch(ogImage, { redirect: 'follow' });
+      ok('og:image is served', r.ok, `HTTP ${r.status}`);
+      const ct = (r.headers.get('content-type') || '').split(';')[0].trim();
+      ok('og:image is an image', /^image\//i.test(ct), ct || '(no content-type)');
+      if (IS_PRODUCTION) ok('og:image is served over HTTPS', r.url.startsWith('https://'), r.url);
+      const body = Buffer.from(await r.arrayBuffer());
+      ok('og:image is not an empty response', body.length > 1024, `${body.length} bytes`);
+    } catch (e) {
+      ok('og:image is served', false, String(e.message || e));
+    }
+  }
+  const appleIcon = (html.match(/<link[^>]+rel=["']apple-touch-icon["'][^>]*href=["']([^"']+)["']/i) || [])[1] || '';
+  ok('the document declares an apple-touch-icon', !!appleIcon, appleIcon || '(none)');
+  if (appleIcon) {
+    const url = appleIcon.startsWith('/') ? `${URL_BASE}${appleIcon}` : appleIcon;
+    try {
+      const r = await fetch(url, { redirect: 'follow' });
+      ok('apple-touch-icon is served', r.ok, `HTTP ${r.status}`);
+    } catch (e) {
+      ok('apple-touch-icon is served', false, String(e.message || e));
+    }
+  }
 }
 
 /* ---- 3. every inventoried file, byte for byte -------------------- */

@@ -44,8 +44,24 @@ const ok = (name, cond, extra = '') => {
   if (!cond) failures++;
 };
 
-/** Everything that may exist at the top of the release directory. */
-const TOP_LEVEL = new Set(['index.html', 'assets', 'release.json', 'SHA256SUMS', 'favicon.ico']);
+/**
+ * Everything that may exist at the top of the release directory.
+ *
+ * This is an allowlist rather than a denylist on purpose: the release is
+ * served from a public hostname, so a file reaches the internet by not being
+ * forbidden here, and anything that has not been thought about should be the
+ * thing that fails. Adding an entry is a decision, not a default.
+ *
+ * `og.jpg` and `apple-touch-icon.png` are here because link previews and iOS
+ * home-screen shortcuts fetch them by a fixed, conventional path — they cannot
+ * be content-hashed into assets/ and referenced from a hashed URL, because the
+ * crawler that wants them never reads the manifest that knows the hash. Both
+ * are generated and committed by tools/og-image.mjs.
+ */
+const TOP_LEVEL = new Set([
+  'index.html', 'assets', 'release.json', 'SHA256SUMS', 'favicon.ico',
+  'og.jpg', 'apple-touch-icon.png',
+]);
 const ASSET_EXT = new Set(['.png', '.jpg', '.jpeg', '.webp', '.avif', '.svg', '.css', '.js', '.woff', '.woff2', '.ico']);
 
 /** Filenames and directories that must never reach a public release. */
@@ -128,6 +144,39 @@ ok('canonical is the production URL', canonicalHref === SITE, `found "${canonica
 const ogTitle = (html.match(/<meta[^>]+property=["']og:title["'][^>]*>/i) || [])[0] || '';
 ok('og:title carries the public name', ogTitle.includes(`content="${TITLE}"`));
 ok('og:url is the production URL', /property=["']og:url["'][^>]*content=["']https:\/\/misty-bunny\.gyute\.fyi\/["']/i.test(html));
+
+/*
+ * The social card.
+ *
+ * The point of checking the *declared* dimensions and not just that the file
+ * exists is that a crawler trusts these: it lays the card out from
+ * og:image:width/height without decoding the image, so a card declaring the
+ * wrong aspect ratio is reserved the wrong space before a single pixel is
+ * fetched. And the image itself is checked to exist, because the commonest
+ * failure here is not a broken tag but a filename that no longer matches the
+ * emitted asset.
+ */
+const ogImage = (html.match(/<meta[^>]+property=["']og:image["'][^>]*>/i) || [])[0] || '';
+const ogImageUrl = (ogImage.match(/content=["']([^"']+)["']/i) || [])[1] || '';
+ok('og:image is declared', !!ogImageUrl, ogImageUrl || 'no og:image meta');
+ok('og:image is an absolute URL on this host',
+  ogImageUrl.startsWith(SITE), ogImageUrl || '(absent)');
+ok('og:image names a file that is in the release',
+  !!ogImageUrl && byRel.has(ogImageUrl.slice(SITE.length).split('?')[0]),
+  ogImageUrl.slice(SITE.length) || '(absent)');
+ok('og:image declares 1200x630',
+  /property=["']og:image:width["'][^>]*content=["']1200["']/i.test(html) &&
+  /property=["']og:image:height["'][^>]*content=["']630["']/i.test(html));
+ok('og:image has alt text',
+  /property=["']og:image:alt["'][^>]*content=["'][^"']+["']/i.test(html));
+
+// summary (the small card) renders the image as a thumbnail beside the text.
+// summary_large_image is what earns a full-width card in a link preview.
+const twitterCard = (html.match(/<meta[^>]+name=["']twitter:card["'][^>]*content=["']([^"']+)["']/i) || [])[1] || '';
+ok('twitter:card is summary_large_image', twitterCard === 'summary_large_image', `found "${twitterCard}"`);
+ok('twitter:image is an absolute card on this host',
+  /name=["']twitter:image["'][^>]*content=["']https:\/\/misty-bunny\.gyute\.fyi\/[^"']+["']/i.test(html));
+ok('apple-touch-icon is declared', /rel=["']apple-touch-icon["']/i.test(html));
 
 // Every same-document href/src has to be a file that is actually there.
 // `base: '/'` makes Vite emit root-absolute references and the source uses

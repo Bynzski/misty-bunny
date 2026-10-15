@@ -21,7 +21,8 @@
     "tour": "node tools/tour.mjs",
     "scans": "node tools/export-scans.mjs",
     "reader": "node tools/reader-shots.mjs",
-    "bake": "blender --background --factory-startup --python tools/blender/materials.py"
+    "bake": "blender --background --factory-startup --python tools/blender/materials.py",
+    "og": "node tools/og-image.mjs"
   },
   "dependencies": {
     "three": "^0.186.1"
