@@ -139,8 +139,14 @@ function domeUV(geo, scale) {
 export function domeWithOculus(radius, height, holeR, material, y = 0, seg = 30) {
   const pts = [];
   const tEnd = Math.acos(Math.min(0.98, holeR / radius));
+  // Sweep t from 0 (the springing, at full radius) up to tEnd, which is where
+  // the profile crosses the hole's radius — and stop there, leaving the crown
+  // open. This used to sweep tEnd to PI/2 instead, which is the *other* end of
+  // the same profile: it built a 1.6 m disc floating at the apex and no dome at
+  // all. The antechamber and the vault were both open to the void overhead,
+  // which in a room this dark simply reads as more darkness.
   for (let i = 0; i <= 18; i++) {
-    const t = tEnd + (i / 18) * (Math.PI * 0.5 - tEnd);
+    const t = (i / 18) * tEnd;
     pts.push(new THREE.Vector2(Math.cos(t) * radius, Math.sin(t) * height));
   }
   const m = new THREE.Mesh(new THREE.LatheGeometry(pts, seg), material.clone());

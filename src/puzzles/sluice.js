@@ -149,6 +149,8 @@ export function buildSluice(ctx) {
     leaf.position.y = FOOT + e * 3.35;
     if (winch) winch.rotation.x = -e * 22;
     if (t >= 1) {
+      // the leaf is at the head of the opening, so stop being a wall
+      ctx.walk.removeBlocker(gateBlock);
       ctx.drain();
       ctx.ui.toast('The sump goes down with a noise like a held breath let out.', 'North, and up the stair', 'good');
       ctx.audio.setSpace('open');
@@ -178,7 +180,13 @@ export function buildSluice(ctx) {
     use: () => ctx.ui.toast('Iron bars, and a channel cut for the flood that is no longer coming.'),
   });
 
-  ctx.blockProp(0, Z - 0.4, 2.0, 0.3);
+  /* The gate is a wall of iron while it is shut, and once it has wound up to
+   * the head of the opening it is not a thing at all. This blocker used to be
+   * added once and never removed, so the passage stayed sealed long after the
+   * leaf had risen — the sump drained, the way north was announced, and the
+   * player still could not get through it. Keep the reference so `update()` can
+   * take it out again the moment the gate is up. */
+  const gateBlock = ctx.blockProp(0, Z - 0.4, 2.0, 0.3);
 
-  return { group: g, update, isOpen: () => opened, plate, leaf };
+  return { group: g, update, isOpen: () => opened, plate, leaf, gateBlock };
 }

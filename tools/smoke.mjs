@@ -439,11 +439,15 @@ try {
   const released = await until(page, () => !window.__meridian.input.state.locked, null, { timeout: 4000 });
   await page.evaluate(() => window.__meridian.reader.close());
   ok('reading a page hands the cursor over', !!released);
+  // Before the sluice is solved the trench is shut off twice over: the gate
+  // leaf is down and the sump is too deep to wade. This used to pass for the
+  // wrong reason — it ran before the gate was opened, so it was measuring the
+  // gate blocker and would have gone on passing even if the water were gone.
   await page.evaluate((yaw) => window.__meridian.player.teleport(0, -7.6, 0, yaw), NORTH);
   await walkUntil(page, () => window.__meridian.player.pos.z < -10.6, { timeout: 20000 })
     .catch(() => {});
   const blockedAt = await page.evaluate(() => window.__meridian.player.pos.z);
-  ok('deep water stops you reaching the trench', blockedAt > -9.6, `stopped at z=${blockedAt.toFixed(2)}`);
+  ok('the closed gate holds you out of the trench', blockedAt > -9.6, `stopped at z=${blockedAt.toFixed(2)}`);
 
   await page.evaluate((yaw) => { const g = window.__meridian; g.player.teleport(0, 0, 0, yaw); }, EAST);
   await walkUntil(page, () => window.__meridian.player.pos.x > 8.4, { timeout: 20000 });
@@ -485,6 +489,24 @@ try {
   ok('the sump drains away', drained < -0.5, `water now ${drained.toFixed(2)}`);
   const gone = await until(page, () => !window.__meridian.world.level.water.visible, null, { timeout: 30000 });
   ok('the water mesh is retired', !!gone);
+
+  /* The whole point of the sluice: with the leaf up and the sump down you can
+   * walk north out of the antechamber and into the trench. This walks it from
+   * where a player would be standing rather than teleporting past the gate,
+   * because that is exactly what was broken — the gate's blocker was added at
+   * build time and never removed, so the passage stayed sealed with the leaf
+   * clear overhead, and every stair test that began north of it passed anyway. */
+  await until(page, () => window.__meridian.parts.sluice.leaf.position.y > 2.4, null, { timeout: 20000 });
+  await page.evaluate((yaw) => window.__meridian.player.teleport(0, -7.6, 0, yaw), NORTH);
+  const throughGate = await walkUntil(page, () => window.__meridian.player.pos.z < -10.8, { timeout: 30000 });
+  const inTrench = await page.evaluate(() => ({
+    z: +window.__meridian.player.pos.z.toFixed(2),
+    y: +window.__meridian.player.floorY.toFixed(2),
+    blockerLeft: !window.__meridian.world.walk.blockers.some((b) => Math.abs(b.z + 9.92) < 0.5),
+  }));
+  ok('the open gate can be walked through', !!throughGate,
+    `z=${inTrench.z} floor=${inTrench.y} gateBlockerRemoved=${inTrench.blockerLeft}`);
+  await shotFast('05b-trench');
 
   await page.evaluate((yaw) => window.__meridian.player.teleport(0, -11, -0.9, yaw), NORTH);
   const reachedGallery = await walkUntil(page, () => window.__meridian.player.floorY > 5.5, { timeout: 90000 });
@@ -548,6 +570,100 @@ try {
   });
   ok('the meridian passage can be walked to the dome',
     !!reachedDome, passage.x === 0 ? `walked to z=${passage.z}` : `stopped at ${JSON.stringify(passage)}`);
+
+  /* ------------------------------------------------------------------ *
+   *  the level has to be crossable on foot
+   * ------------------------------------------------------------------ */
+  console.log('\n▸ on foot');
+  /* Every walk region is tested with the player as a 0.64 m circle, so two
+   * regions that merely *touch* leave a seam they are stuck in — still standing
+   * in the room they came from, next room open in front of them. Two junctions
+   * had exactly that: the antechamber stopped 0.57 m short of the trench, and
+   * the landing overlapped the gallery by 0.20 m. The second made the level
+   * impossible to finish. Every earlier test teleported past at least one of
+   * them, or only asserted a floor height the landing already satisfied, so the
+   * whole game could be unreachable and the suite still went green.
+   *
+   * This runs here because it needs the meridian gate open, and before the
+   * vault because the ending card locks the player in place. */
+  const LEGS = [
+    ['antechamber -> trench', 0, -7.6, 0, -11.0],
+    ['trench -> foot of stair', 0, -12.0, -0.95, -17.0],
+    ['stair -> landing', 0, -29.0, 5.0, -31.5],
+    ['landing -> gallery', 0, -30.5, 6, -36.0],
+    ['gallery -> meridian passage', 0, -49.0, 6, -54.0],
+    ['meridian passage -> dome', 0, -55.0, 6, -59.0],
+  ];
+  for (const [name, sx, sz, sy, target] of LEGS) {
+    await page.evaluate(([x, z, y]) => window.__meridian.player.teleport(x, z, y, 0), [sx, sz, sy]);
+    await sleep(250);
+    await page.keyboard.down('w');
+    const t0 = Date.now();
+    let reached = false;
+    while (Date.now() - t0 < 45000) {
+      const z = await page.evaluate(() => window.__meridian.player.pos.z);
+      if (z < target) { reached = true; break; }
+      await sleep(300);
+    }
+    await page.keyboard.up('w');
+    const z = await page.evaluate(() => +window.__meridian.player.pos.z.toFixed(2));
+    ok(`walk: ${name}`, reached, reached ? `z=${z}` : `stuck at z=${z}, needed ${target}`);
+  }
+
+  /* ------------------------------------------------------------------ *
+   *  every walkable spot needs a floor and a roof
+   * ------------------------------------------------------------------ */
+  /* The antechamber and the vault had no ceiling at all — domeWithOculus swept
+   * the wrong end of its own profile and produced a 1.6 m disc floating at the
+   * apex instead of a dome. Both rooms were open to the void, which in a room
+   * this dark simply reads as more darkness, so nothing looked wrong. On top
+   * of that the player could walk out over 2.8 m of nothing at the head of the
+   * stair and 0.57 m at the sluice threshold. No other test here looks at
+   * geometry, so it is looked at here. */
+  const gaps = await page.evaluate(() => {
+    const g = window.__meridian, T = g.world.THREE;
+    const { scene, walk } = g.world;
+    scene.updateMatrixWorld(true);
+    const seeThrough = (o) => {
+      const m = o.material;
+      return !o.visible || (m && (m.visible === false || m.transparent)) || o.name === 'water';
+    };
+    // the two oculi are meant to be holes in the roof
+    const OCULI = [[0, 0, 1.65], [0, -65.5, 1.7]];
+    const rc = new T.Raycaster();
+    const from = new T.Vector3();
+    const probe = (x, y, z, dy, far) => {
+      from.set(x, y, z);
+      rc.set(from, new T.Vector3(0, dy, 0));
+      rc.near = 0.01; rc.far = far;
+      for (const h of rc.intersectObjects(scene.children, true)) {
+        if (!seeThrough(h.object)) return h;
+      }
+      return null;
+    };
+    let minX = 1e9, maxX = -1e9, minZ = 1e9, maxZ = -1e9;
+    for (const p of walk.polys) for (const q of p.pts) {
+      minX = Math.min(minX, q.x); maxX = Math.max(maxX, q.x);
+      minZ = Math.min(minZ, q.z); maxZ = Math.max(maxZ, q.z);
+    }
+    const holes = [], skies = [];
+    for (let x = minX; x <= maxX; x += 1.2) {
+      for (let z = minZ; z <= maxZ; z += 1.2) {
+        if (!walk.walkableAt(x, z, 0.32)) continue;
+        const y = walk.heightAt(x, z);
+        if (y === null || !Number.isFinite(y)) continue;
+        const f = probe(x, y + 0.35, z, -1, 6);
+        if (!f || (y + 0.35 - f.point.y) > 1.1) holes.push([+x.toFixed(1), +z.toFixed(1)]);
+        const underOculus = OCULI.some(([ox, oz, r]) => Math.hypot(x - ox, z - oz) < r);
+        if (!underOculus && !probe(x, y + 1.7, z, 1, 40)) skies.push([+x.toFixed(1), +z.toFixed(1)]);
+      }
+    }
+    return { holes, skies };
+  });
+  ok('no floor is missing underfoot', gaps.holes.length === 0,
+    gaps.holes.length ? gaps.holes.slice(0, 6).map((p) => p.join(',')).join(' | ') : 'every walkable spot has a floor');
+  ok('no room is open to the sky', gaps.skies.length === 0,
+    gaps.skies.length ? gaps.skies.slice(0, 6).map((p) => p.join(',')).join(' | ') : 'every walkable spot has a roof');
 
   /* ------------------------------------------------------------------ *
    *  puzzle 3 — the vault

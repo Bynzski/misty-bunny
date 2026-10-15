@@ -7,6 +7,7 @@ import {
 } from '../art/builders.js';
 import { framedSheet, registerClue } from './clueProp.js';
 import { clueCanvas } from '../art/textures.js';
+import { LAYOUT } from './level.js';
 
 export function buildAntechamber(ctx) {
   const { M, scene, level } = ctx;
@@ -38,9 +39,21 @@ export function buildAntechamber(ctx) {
 
   /* ================= CLUE: the keeper's slate (beside the sluice) ================= */
   {
+    // Hung on the clear stretch of the north wall between the north-west pier
+    // and the sluice doorway. It used to sit at x = -3.25, which is inside the
+    // body of that pier: the stone covered the left 59% of the sheet, leaving
+    // the clue legible only as "EEPS" and "ES." — and tools/audit.mjs passed it,
+    // because the pick-box still poked out far enough to put the prompt on
+    // screen. The whole face has to be clear, not a corner of it.
+    //
+    // That gap is 1.17 m wide and the framed sheet is 1.01 m across, so it
+    // just takes it. The pilaster is 0.7 m across the wall by 0.34 m deep,
+    // set 0.36 m in from the corner with its shaft a further 0.17 m outboard,
+    // which puts its east face at x = -3.17; the sluice opening is 4.0 m on the
+    // axis, so its west jamb is at x = -2.
     const p = new THREE.Group();
-    p.position.set(-3.25, 1.62, -8.6);
-    p.rotation.y = 0.12;
+    p.position.set(-2.59, 1.62, -8.72);
+    p.rotation.y = 0.07;
     g.add(p);
     p.add(framedSheet(ctx, 'slate', 0.9));
     const hit = box(1.1, 1.5, 0.4, new THREE.MeshBasicMaterial({ visible: false }), 0, 0, 0.25);
@@ -50,8 +63,23 @@ export function buildAntechamber(ctx) {
 
   /* ================= CLUE: the tide gauge (north-east pier) ================= */
   {
+    // Mounted *on* the pier, not in the wall behind it. The plain (3.35, -8.58)
+    // this used to sit at is inside the body of the north-east pilaster — the one
+    // the level builder puts on every octagon vertex, inset 0.36 off the corner —
+    // so the stone rendered straight through the plate and the gauge was invisible
+    // in the room while still answering to the crosshair. The pier stands on a
+    // radius from the chamber centre, so both the position and the rotation are
+    // derived from the vertex rather than hard-coded, and the plate ends up flush
+    // against the pier's inward face.
+    const PIER_N = Math.atan2(LAYOUT.ante.poly[6].x, LAYOUT.ante.poly[6].z); // 157.5deg
+    const PIER_R = LAYOUT.ante.r - 0.36;
     const p = new THREE.Group();
-    p.position.set(3.35, 1.95, -8.58);
+    p.position.set(
+      Math.sin(PIER_N) * PIER_R - Math.sin(PIER_N) * 0.07,
+      1.95,
+      Math.cos(PIER_N) * PIER_R - Math.cos(PIER_N) * 0.07,
+    );
+    p.rotation.y = PIER_N - Math.PI;      // face into the room, not into the stone
     g.add(p);
     const src = clueCanvas('gauge');
     const tex = new THREE.CanvasTexture(src);
@@ -68,7 +96,7 @@ export function buildAntechamber(ctx) {
     const hit = box(0.7, 1.6, 0.5, new THREE.MeshBasicMaterial({ visible: false }), 0, 0, 0.3);
     p.add(hit);
     registerClue(ctx, hit, 'gauge', { label: 'the tide gauge' });
-    ctx.blockProp(3.35, -8.5, 0.35, 0.2);
+    ctx.blockProp(p.position.x, p.position.z, 0.35, 0.2);
   }
 
   /* ================= CLUE: the keeper's logbook (east alcove) ================= */

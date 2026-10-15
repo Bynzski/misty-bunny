@@ -14,7 +14,13 @@ export const LAYOUT = {
   ante: { poly: octagonPoly(0, 0, 9.5), y: 0, ceil: 7.0, r: 9.5 },
   sluice: { poly: rectPoly(-2.0, 2.0, -15.8, -9.35), topY: 0, botY: -0.95, rampZ: -12.0 },
   stair: { poly: rectPoly(-3.0, 3.0, -30.6, -14.6), y0: -0.95, y1: 6.0, zTop: -15.8, zBot: -30.6 },
-  landing: { poly: rectPoly(-4.6, 4.6, -33.0, -29.6), y: 6 },
+  // Reaches 0.8 m past the gallery's south edge (z = -32.80) so the two regions
+  // overlap by far more than the player's diameter. At -33.0 it overlapped by
+  // 0.20 m and the player could not cross from the landing into the hall.
+  // Narrowed to the stair hall's own interior (the side walls are at x = ±2.95)
+  // — at ±4.6 it offered the player four metres of walkable floor on each side
+  // that was neither floored nor roofed.
+  landing: { poly: rectPoly(-2.95, 2.95, -34.0, -29.6), y: 6 },
   gallery: { poly: octagonPoly(0, -42.5, 10.5), y: 6, ceil: 15.6, r: 10.5 },
   // Walkable regions are tested with the player as a circle of radius 0.32, so
   // two regions that merely *touch* leave a seam wider than the player and
@@ -35,13 +41,28 @@ export function buildLevel(ctx) {
   scene.add(root);
   ctx.root = root;
 
-  /* ---------------- walk regions ---------------- */
-  // The sluice trench: a ramp down from the chamber floor, then flat.
+  /* ---------------- walk regions ----------------
+   * Regions are tested with the player as a 0.64 m circle, so two regions that
+   * merely *touch* leave a seam the player is stuck in — standing in the room
+   * they came from with the next one open in front of them. Every junction on
+   * the critical path therefore has to OVERLAP, not meet. The meridian passage
+   * below says as much; these are the two junctions that had not been done:
+   * the antechamber stopped 0.57 m short of the trench, and the landing
+   * overlapped the gallery by 0.20 m. Both left the player wedged, and the
+   * second one made the level impossible to finish on foot. */
   const S = LAYOUT.sluice;
-  walk.addRegion(S.poly, S.botY, (x, z) => {
+  const rampFloor = (x, z) => {
     const t = THREE.MathUtils.clamp((z - S.poly[3].z) / (S.rampZ - S.poly[3].z), 0, 1);
     return THREE.MathUtils.lerp(S.topY, S.botY, t * t * (3 - 2 * t));
-  });
+  };
+  // The overlap has to clear the player's DIAMETER, not its radius. The octagon
+  // ends at z = -8.777, so the player stops fitting inside it at z = -8.457;
+  // the trench region has to already be accepting them by then, which needs its
+  // north edge at z >= -8.14. -8.0 leaves a clear margin, and the floor clamps
+  // to y = 0 across the whole overlap so it stays flush with the chamber.
+  // Only the WALK region is extended: the ramp geometry still starts at the
+  // threshold, or it would poke through the doorway into the room.
+  walk.addRegion(rectPoly(S.poly[0].x, S.poly[1].x, S.poly[0].z, -8.0), S.botY, rampFloor);
   // The stair: from the foot of the trench up to the gallery.
   const T = LAYOUT.stair;
   walk.addRegion(T.poly, 0, (x, z) => {
@@ -176,9 +197,48 @@ export function buildLevel(ctx) {
         g.add(rw);
       }
     }
-    // flat trench floor from the foot of the ramp to the back wall
+    // flat trench floor from the foot of the ramp to the foot of the flight
     g.add(box(4.0, 0.5, s.rampZ - zBot, M.floorWet, 0, s.botY - 0.25, (s.rampZ + zBot) / 2));
-    g.add(box(4.7, 4.6, 0.6, M.wall, 0, 1.35, zBot - 0.3));
+
+    /* The threshold. The chamber floor stops at the wall (z = -8.78) and the
+     * first ramp slab starts at the near side of the opening (z = -9.35), which
+     * left 0.57 m of nothing between them — and 0.57 m is wider than the seam
+     * that stopped the player walking, so the fix that let them through only
+     * let them walk out over a hole. The floor is carried through the wall
+     * thickness so the doorway has a sill to cross. */
+    g.add(box(4.0, 0.5, 0.9, M.floorWet, 0, -0.25, -8.95));
+
+    /* ---- the portal into the stair hall ----
+     * This used to be a blank wall across the whole passage at z = -16.1,
+     * commented "the closed end". It was written when the sump was a dead end,
+     * but the flight beyond begins at z = -15.8, so the wall sat directly
+     * across the first tread. Opening the sluice left the player facing solid
+     * stone at the bottom of a drained trench, and because collision is driven
+     * by the walk regions rather than by geometry they then walked straight
+     * through it into the stair — a corridor that could only be crossed by
+     * walking into a wall.
+     *
+     * What belongs here is the junction itself: two piers filling the step
+     * between the narrow trench bore and the much wider, much taller hall, and
+     * a lintel closing the void between the two ceilings. The opening left
+     * between them is 4.0 m by 3.25 m, which is what the player is meant to
+     * walk through.
+     */
+    {
+      const trenchInner = 2.0;                 // inner face of the trench bore
+      const hallInner = 2.95;                  // inner face of the hall walls
+      const piers = hallInner - trenchInner;   // 0.95 of wall to fill each side
+      const midX = (hallInner + trenchInner) / 2;
+      const D = 0.7;                           // depth of the jamb, into the hall
+      for (const sx of [-1, 1]) {
+        g.add(box(piers, 4.6, D, M.wall, sx * midX, 1.35, zBot - D / 2));
+      }
+      // lintel from the top of the trench ceiling up to the hall ceiling
+      const lintelBot = 2.9, lintelTop = 7.35;
+      g.add(box(hallInner * 2, lintelTop - lintelBot, D, M.wall, 0, (lintelBot + lintelTop) / 2, zBot - D / 2));
+      // a shallow relieving band so the head of the opening is not a raw seam
+      g.add(box(trenchInner * 2 + 0.5, 0.34, D + 0.16, M.wallLow, 0, 3.07, zBot - (D + 0.16) / 2));
+    }
     mid.add(g);
   }
 
@@ -190,13 +250,45 @@ export function buildLevel(ctx) {
     mid.add(st);
     // a landing where the trench and the flight meet
     mid.add(box(5.2, 0.5, 1.6, M.wallLow, 0, s.y0 - 0.25, zBot - 0.5));
+
+    /* The landing at the HEAD of the flight, which does not exist. The treads
+     * stop at about z = -30.0 and the gallery's own floor polygon does not
+     * begin until its southern edge at z = -32.80, so the walk region in
+     * between spans 2.8 m of nothing. The player crossed the hall mouth
+     * walking on air. It reads as a hole only if the light happens to catch
+     * the edge, which is why it survived so long. */
+    const headZ = -30.1, galleryEdge = -32.798;
+    mid.add(box(6.4, 0.5, Math.abs(galleryEdge - headZ) + 0.6,
+      M.floorDry, 0, s.y1 - 0.25, (galleryEdge + headZ) / 2));
     for (const sx of [-3.4, 3.4]) {
       const len = Math.hypot(zTop - zBot, s.y1 - s.y0);
       const w = box(0.9, 5.2, len, M.wall, sx, (s.y0 + s.y1) / 2 + 1.7, (zTop + zBot) / 2);
       w.rotation.x = Math.atan2(s.y1 - s.y0, zBot - zTop);
       mid.add(w);
     }
-    mid.add(box(7.6, 0.6, Math.abs(zTop - zBot) + 1, M.ceiling, 0, (s.y0 + s.y1) / 2 + 5.0, (zTop + zBot) / 2));
+    /* The hall roof, parallel to the side walls.
+     *
+     * It used to be a flat slab stretched over the whole hall, which looks
+     * fine until you notice where the walls go: they lean with the flight, so
+     * a flat roof closes the headroom from eight metres at the foot of the
+     * stair to 1.2 m at the top — low enough that the player's eye is INSIDE
+     * the slab on the landing, and a ray cast upward from there finds nothing
+     * at all because the roof is already behind them. */
+    {
+      const ang = Math.atan2(s.y1 - s.y0, zBot - zTop);
+      const len = Math.hypot(zTop - zBot, s.y1 - s.y0);
+      const up = new THREE.Vector3(0, Math.cos(ang), Math.sin(ang));      // the walls' own up
+      const along = new THREE.Vector3(0, -Math.sin(ang), Math.cos(ang));  // + is downhill
+      const base = new THREE.Vector3(0, (s.y0 + s.y1) / 2 + 1.7, (zTop + zBot) / 2);
+      const reach = 3.2;                  // extra run, to cover the upper landing
+      const roof = box(7.6, 0.6, len + reach, M.ceiling, 0, 0, 0);
+      roof.position.copy(base)
+        .addScaledVector(up, 2.95)         // clear of the 5.2 m side walls
+        .addScaledVector(along, -reach / 2) // lengthened uphill, past the landing
+        .addScaledVector(along, -1.24);     // and pulled back, so the low end
+      roof.rotation.x = ang;               // stays inside the trench mouth
+      mid.add(roof);
+    }
   }
 
   /* ================= GEAR GALLERY ================= */
@@ -306,6 +398,7 @@ export function buildLevel(ctx) {
   // sized to the flooded part of the level only — the stair hall is dry
   const waterGeo = new THREE.PlaneGeometry(21, 27, 24, 30);
   const water = new THREE.Mesh(waterGeo, waterMat);
+  water.name = 'water';            // addressable: tools/audit.mjs must see through it
   water.rotation.x = -Math.PI / 2;
   water.position.set(0, 0.26, -3.2);
   water.renderOrder = 2;

@@ -33,8 +33,26 @@ export function createWalkSpace() {
     },
 
     addBlocker(x, z, hw, hd, tall = true) {
-      blockers.push({ x, z, hw, hd, tall });
-      return api;
+      const b = { x, z, hw, hd, tall };
+      blockers.push(b);
+      return b;
+    },
+
+    /**
+     * Drop a blocker added earlier.
+     *
+     * Gates are blockers until they are open and then they are not, and the
+     * sluice learned that the hard way: its blocker was pushed once at build
+     * time and never came out, so the passage stayed sealed after the gate had
+     * risen — the player walked into an invisible wall two thirds of a metre
+     * short of the trench with the leaf clear overhead. `addBlocker` hands the
+     * blocker back so it can be removed again by reference.
+     */
+    removeBlocker(b) {
+      const i = blockers.indexOf(b);
+      if (i < 0) return false;
+      blockers.splice(i, 1);
+      return true;
     },
 
     /** Register every `userData.blocker` found beneath `root`. */

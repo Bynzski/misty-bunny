@@ -222,8 +222,14 @@ export function buildGallery(ctx) {
     const pl = new THREE.PointLight(0xffb45e, 9, 16, 1.7);
     pl.position.set(-2.2, FY + 4.0, -37.2);
     g.add(pl);
+    // The lamp hangs at FY + 4.2 and the player's eye is at FY + 1.62, so even
+    // standing directly underneath it the lamp is 2.58 m away — which put it
+    // outside its own 2.2 m interaction range. It was plainly visible and could
+    // never be used: no standing position put the prompt on screen. The reach
+    // is a looking distance, not an arm's length, so it has to clear the height
+    // the lamp actually hangs at.
     ctx.register(lamp, {
-      id: 'gallerylamp', label: 'a working lamp', range: 2.2,
+      id: 'gallerylamp', label: 'a working lamp', range: 3.6,
       use: () => ctx.ui.toast('Wick trimmed, glass clean. Someone has kept this one lit for eighty years.'),
     });
   }
