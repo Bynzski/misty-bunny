@@ -75,16 +75,36 @@ async function walkUntil(page, probe, { timeout = 90000 } = {}) {
   }
 }
 
-const server = spawn('npx', ['vite', 'preview', '--port', String(PORT), '--strictPort'], {
-  stdio: ['ignore', 'pipe', 'pipe'],
-});
-server.stderr.on('data', (d) => {
-  const s = String(d);
-  if (!/npm notice/.test(s)) process.stderr.write('[vite] ' + s);
-});
+/**
+ * Where to play.
+ *
+ * By default the harness serves the production build out of `dist/` itself, so
+ * it is always testing the artifact rather than the dev server. Point
+ * SMOKE_URL at an origin to run the identical assertions against something
+ * already deployed — which is the only way to find out that a release which
+ * built cleanly is actually being served.
+ *
+ *   node tools/smoke.mjs --shots
+ *   SMOKE_URL=https://misty-bunny.gyute.fyi/ node tools/smoke.mjs
+ */
+const TARGET = (process.env.SMOKE_URL || `http://127.0.0.1:${PORT}/`).replace(/([^/])\/*$/, '$1/');
+const EXTERNAL = !!process.env.SMOKE_URL;
+
+let server = null;
+if (!EXTERNAL) {
+  server = spawn('npx', ['vite', 'preview', '--port', String(PORT), '--strictPort'], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  server.stderr.on('data', (d) => {
+    const s = String(d);
+    if (!/npm notice/.test(s)) process.stderr.write('[vite] ' + s);
+  });
+}
+
+console.log(`\n▸ playing ${TARGET}${EXTERNAL ? '  (external target — this is the deployed site)' : ''}`);
 
 for (let i = 0; i < 100; i++) {
-  try { if ((await fetch(`http://127.0.0.1:${PORT}/`)).ok) break; } catch { /* not up */ }
+  try { if ((await fetch(TARGET)).ok) break; } catch { /* not up */ }
   await sleep(250);
 }
 
@@ -106,6 +126,17 @@ try {
   await page.setViewport({ width: 1000, height: 600, deviceScaleFactor: 1 });
 
   const errors = [];
+
+  // Tracked separately from `errors`, because the console filter at the end
+  // deliberately ignores "Failed to load resource" — which is exactly the
+  // message a mistyped asset path or a release served from the wrong root
+  // produces, and exactly the failure this harness has to be loud about.
+  const badResponses = [];
+  page.on('response', (r) => {
+    const s = r.status();
+    if (s >= 400 && !/favicon/i.test(r.url())) badResponses.push(`${s} ${r.url()}`);
+  });
+
   page.on('pageerror', (e) => errors.push('pageerror: ' + e.message));
   page.on('console', (m) => {
     const t = m.text();
@@ -131,7 +162,7 @@ try {
   };
 
   console.log('\n▸ loading');
-  await page.goto(`http://127.0.0.1:${PORT}/`, { waitUntil: 'domcontentloaded', timeout: 90000 });
+  await page.goto(TARGET, { waitUntil: 'domcontentloaded', timeout: 90000 });
   await page.waitForSelector('#title.is-open', { timeout: 90000 });
   ok('title screen appears', true);
   await shot('01-title');
@@ -692,6 +723,15 @@ try {
   const real = errors.filter((e) => !/favicon|Autoplay|AudioContext|SwiftShader|GroupMarkerNotSet|GL_DISPLAY_ERROR|Failed to load resource/i.test(e));
   ok('no runtime errors', real.length === 0, real.slice(0, 6).join(' | '));
 
+  // Every byte the game asked for actually arrived. This is the check that
+  // fails when a release is served from the wrong root, when a baked texture
+  // did not make it into the artifact, or when a CDN answers 404 for a file
+  // that is plainly there on disk.
+  ok('every request succeeded', badResponses.length === 0,
+    [...new Set(badResponses)].slice(0, 8).join(' | '));
+  const fetched = await page.evaluate(() => performance.getEntriesByType('resource').length);
+  console.log(`        ${fetched} subresource(s) requested, ${badResponses.length} failed`);
+
   const perf = await page.evaluate(() => {
     const g = window.__meridian;
     return {
@@ -704,7 +744,7 @@ try {
   console.log(`\n  scene: ${perf.tris} triangles · ${perf.geo} geometries · ${perf.tex} textures · ${perf.prog} programs`);
 } finally {
   await browser.close();
-  server.kill('SIGTERM');
+  if (server) server.kill('SIGTERM');
 }
 
 console.log(failures ? `\n${failures} FAILURE(S)\n` : '\nall good\n');

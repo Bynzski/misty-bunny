@@ -1,0 +1,246 @@
+# Builds Misty Bunny from an exact commit, verifies the artifact, ships it to
+# the VPS over a restricted deployment identity, and then proves over public
+# HTTPS that the site is serving that commit.
+#
+# Nothing here deploys unless the release it was handed survived an audit. See
+# docs/DEPLOYMENT.md for the server-side contract this expects Fred to
+# provision (`misty-bunny-release <source-sha> <tarball-sha256>`, tarball on
+# stdin). Until that entry exists the deploy step fails, loudly, by design.
+
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Nothing here needs to write to the repository, create a release, or reach
+# any other resource. The one credential is the deploy key, and it is only ever
+# read.
+permissions:
+  contents: read
+
+env:
+  SITE: https://misty-bunny.gyute.fyi
+  RELEASE_DIR: misty-bunny
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Build from an exact sha and refuse to publish anything that is not the
+  # thing we meant to publish.
+  # ---------------------------------------------------------------------
+  build:
+    name: build and audit
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: misty-bunny-${{ github.ref }}
+      cancel-in-progress: false
+    outputs:
+      sha: ${{ steps.ident.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install from the lockfile
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Identify the exact commit
+        id: ident
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          test "$sha" = "${{ github.sha }}" || { echo "checkout is $sha, expected ${{ github.sha }}"; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Stamp the release with its provenance
+        run: |
+          node tools/stamp-release.mjs \
+            --sha "${{ steps.ident.outputs.sha }}" \
+            --ref "${{ github.ref_name }}"
+
+      - name: Audit the release
+        run: node tools/check-dist.mjs --require-release --expect-sha "${{ steps.ident.outputs.sha }}"
+
+      # Reproducible archive: fixed order, fixed owner, fixed mtime, so the
+      # same commit always produces the same bytes and therefore the same
+      # sha256. gzip's own header timestamp is pinned by GZIP=-n.
+      - name: Package the release
+        run: |
+          set -euo pipefail
+          echo "GZIP=-n" >> "$GITHUB_ENV"
+          tar --sort=name --owner=0 --group=0 --numeric-owner \
+              --mtime="@$(git log -1 --pretty=%ct)" \
+              -czf "${RUNNER_TEMP}/misty-bunny.tar.gz" -C dist .
+          sha256sum "${RUNNER_TEMP}/misty-bunny.tar.gz" | tee "${RUNNER_TEMP}/misty-bunny.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: misty-bunny-release
+          path: |
+            ${{ runner.temp }}/misty-bunny.tar.gz
+            ${{ runner.temp }}/misty-bunny.tar.gz.sha256
+          retention-days: 7
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------
+  # Ship it. Runs only for a push to the production branch, never for a pull
+  # request and never for a manual run against a fork.
+  # ---------------------------------------------------------------------
+  deploy:
+    name: deploy to production
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    environment: production
+    # Per-site serialisation. Two pushes to main cannot deploy concurrently, and
+    # a deployment already in flight is never cancelled halfway by a newer one —
+    # the symlink swap is atomic, so the worst case is a redundant deploy.
+    concurrency:
+      group: misty-bunny-production
+      cancel-in-progress: false
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: misty-bunny-release
+          path: ${{ runner.temp }}
+
+      - name: Reject an incomplete configuration
+        env:
+          HOST: ${{ vars.MISTY_BUNNY_SSH_HOST }}
+          KEY: ${{ vars.MISTY_BUNNY_SSH_HOST_KEY_SHA256 }}
+          KEYFILE: ${{ secrets.MISTY_BUNNY_DEPLOY_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          missing=0
+          [ -n "$HOST" ]    || { echo "::error::repository variable MISTY_BUNNY_SSH_HOST is not set"; missing=1; }
+          [ -n "$KEY" ]     || { echo "::error::repository variable MISTY_BUNNY_SSH_HOST_KEY_SHA256 is not set (the pinned host key fingerprint)"; missing=1; }
+          [ -n "$KEYFILE" ] || { echo "::error::secret MISTY_BUNNY_DEPLOY_SSH_KEY is not set"; missing=1; }
+          [ "$missing" -eq 0 ] || { echo "See docs/DEPLOYMENT.md for what each of these is."; exit 1; }
+
+      # The key lands in a 0600 file inside RUNNER_TEMP and is shredded in the
+      # cleanup step below whatever happens in between.
+      - name: Stage the deployment identity
+        env:
+          KEYFILE: ${{ secrets.MISTY_BUNNY_DEPLOY_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 "${RUNNER_TEMP}/ssh"
+          printf '%s\n' "$KEYFILE" > "${RUNNER_TEMP}/ssh/id_ed25519"
+          chmod 600 "${RUNNER_TEMP}/ssh/id_ed25519"
+
+      # Host key pinning by fingerprint. `ssh-keyscan` is only used as a way of
+      # *obtaining* the key; the key is not trusted because it was scanned, it
+      # is trusted because its SHA256 fingerprint has to equal the one recorded
+      # in the repository. A changed key aborts the deploy — which is what makes
+      # TOFU safe here.
+      - name: Pin the server host key
+        env:
+          SSH_HOST: ${{ vars.MISTY_BUNNY_SSH_HOST }}
+          SSH_PORT: ${{ vars.MISTY_BUNNY_SSH_PORT }}
+          EXPECTED: ${{ vars.MISTY_BUNNY_SSH_HOST_KEY_SHA256 }}
+        run: |
+          set -euo pipefail
+          known="${RUNNER_TEMP}/ssh/known_hosts"
+          : > "$known"
+          for algo in ed25519 rsa ecdsa; do
+            ssh-keyscan -T 15 -p "${SSH_PORT:-22}" -t "$algo" "$SSH_HOST" 2>/dev/null >> "$known" || true
+          done
+          if [ ! -s "$known" ]; then echo "::error::could not reach $SSH_HOST:${SSH_PORT:-22}"; exit 1; fi
+
+          expected="$(printf '%s' "$EXPECTED" | tr ',' '\n' | sed 's/^ *//;s/ *$//' | grep -v '^$' || true)"
+          matched=0
+          while read -r line; do
+            fp="$(ssh-keygen -lf /dev/stdin <<<"$line" -E sha256 | awk '{print $2}')"
+            [ -n "$fp" ] || continue
+            if printf '%s\n' "$expected" | grep -qxF "$fp"; then
+              echo "::notice::pinned host key matches $fp"
+              matched=1
+            else
+              echo "::error::host key does not match the pinned fingerprint: $fp"
+            fi
+          done < "$known"
+
+          if [ "$matched" -ne 1 ]; then
+            echo "::error::no pinned host key fingerprint matched — refusing to deploy"
+            echo "If the server key genuinely rotated, update MISTY_BUNNY_SSH_HOST_KEY_SHA256 deliberately."
+            exit 1
+          fi
+
+      - name: Deploy
+        env:
+          SSH_HOST: ${{ vars.MISTY_BUNNY_SSH_HOST }}
+          SSH_PORT: ${{ vars.MISTY_BUNNY_SSH_PORT }}
+          SSH_USER: ${{ vars.MISTY_BUNNY_SSH_USER }}
+          SHA: ${{ needs.build.outputs.sha }}
+        run: |
+          set -euo pipefail
+          tarball="${RUNNER_TEMP}/misty-bunny.tar.gz"
+          sum="$(cut -d' ' -f1 < "${RUNNER_TEMP}/misty-bunny.tar.gz.sha256")"
+
+          set +e
+          ssh -i "${RUNNER_TEMP}/ssh/id_ed25519" \
+              -o IdentitiesOnly=yes \
+              -o BatchMode=yes \
+              -o StrictHostKeyChecking=yes \
+              -o "UserKnownHostsFile=${RUNNER_TEMP}/ssh/known_hosts" \
+              -p "${SSH_PORT:-22}" \
+              "${SSH_USER}@${SSH_HOST}" \
+              "misty-bunny-release ${SHA} ${sum}" < "$tarball" 2>&1 | tee "${RUNNER_TEMP}/deploy.log"
+          status=${PIPESTATUS[0]}
+          set -e
+
+          if [ "$status" -ne 0 ]; then
+            echo "::error::deployment failed (exit $status)"
+            grep -qi 'command not found\|not found\|permission denied' "${RUNNER_TEMP}/deploy.log" && \
+              echo "::error::the server-side entry 'misty-bunny-release' may not be provisioned yet — see docs/DEPLOYMENT.md"
+            exit "$status"
+          fi
+          echo "::notice::server accepted $SHA"
+
+      # A deploy that reports success and a site that serves something else is
+      # the failure this catches. It re-reads the release over the public
+      # hostname and checks the sha, then fetches every file the release says
+      # it contains and compares it byte for byte.
+      - name: Verify over public HTTPS
+        env:
+          SHA: ${{ needs.build.outputs.sha }}
+        run: |
+          set -euo pipefail
+          node tools/verify-live.mjs --url "$SITE" --expect-sha "$SHA"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Misty Bunny deployed"
+            echo
+            echo "- commit: \`${{ needs.build.outputs.sha }}\`"
+            echo "- site: ${SITE}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove temporary credentials
+        if: always()
+        run: |
+          # Ephemeral runner, so this is belt and braces — but a key that is
+          # written should be removed on every path out of the job, including
+          # the failing ones.
+          if [ -d "${RUNNER_TEMP}/ssh" ]; then
+            find "${RUNNER_TEMP}/ssh" -type f -exec shred -u {} + 2>/dev/null || \
+              find "${RUNNER_TEMP}/ssh" -type f -delete
+            rm -rf "${RUNNER_TEMP}/ssh"
+          fi
+          rm -f "${RUNNER_TEMP}/misty-bunny.tar.gz"
+          echo "temporary credentials removed"

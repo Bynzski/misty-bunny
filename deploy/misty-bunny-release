@@ -1,0 +1,148 @@
+#!/bin/sh
+# misty-bunny-release — install one Misty Bunny release, atomically.
+#
+#   misty-bunny-release <source-sha-40hex> <tarball-sha256-64hex>   (tarball on stdin)
+#
+# PROPOSAL — this is the repository's side of the contract described in
+# docs/DEPLOYMENT.md, supplied for review. Fred owns the live server
+# integration: install it, adapt it, harden it, and apply it under his own
+# change control. It is not deployed by this repository and has never been run
+# against the production VPS.
+#
+# The whole job is: prove the bytes you were handed are the bytes that were
+# built, put them somewhere nobody will touch again, and move a symlink. If
+# anything about the upload is wrong, nothing moves and the site keeps serving
+# whatever it was serving before.
+#
+# Exit codes: 0 ok | 2 usage | 3 tarball checksum mismatch | 4 release inventory
+# mismatch | 5 filesystem error.
+
+set -eu
+
+ROOT=${MISTY_BUNNY_ROOT:-/srv/games/misty-bunny}
+KEEP=${MISTY_BUNNY_KEEP:-5}      # releases retained for rollback
+
+E_USAGE=2
+E_CHECKSUM=3
+E_INVENTORY=4
+E_FS=5
+
+die() {
+	code=$1; shift
+	printf 'misty-bunny-release: %s\n' "$*" >&2
+	exit "$code"
+}
+
+[ $# -eq 2 ] || die $E_USAGE "usage: misty-bunny-release <source-sha> <tarball-sha256>"
+
+SHA=$1
+SUM=$2
+
+printf '%s' "$SHA" | grep -Eq '^[0-9a-f]{40}$' || die $E_USAGE "source sha must be 40 hex characters"
+printf '%s' "$SUM" | grep -Eq '^[0-9a-f]{64}$' || die $E_USAGE "tarball sha256 must be 64 hex characters"
+
+RELEASES="$ROOT/releases"
+STAGE="$ROOT/.incoming"
+
+# Anything already staged by a previous, interrupted run is ours to clear: it
+# is inside the staging directory and nothing outside it is ever removed.
+rm -rf "$STAGE"
+mkdir -p "$STAGE"
+
+# 022 rather than whatever was inherited: Caddy has to be able to read what
+# lands here, and a 077 umask would quietly publish it group-writable.
+umask 022
+
+# ---- 1. receive ----------------------------------------------------
+tarball="$STAGE/misty-bunny.tar.gz"
+cat > "$tarball"
+
+# ---- 2. the bytes you sent are the bytes that were built -----------
+actual=$(sha256sum "$tarball" | cut -d' ' -f1)
+if [ "$actual" != "$SUM" ]; then
+	rm -rf "$STAGE"
+	die $E_CHECKSUM "tarball sha256 $actual does not match the declared $SUM"
+fi
+
+# ---- 3. unpack into a staging directory, as this user --------------
+work="$STAGE/tree"
+mkdir -p "$work"
+# --no-same-owner because this user is not root and must not pretend to be;
+# --no-same-permissions so the archive cannot introduce setuid or setgid bits.
+tar -xzf "$tarball" -C "$work" --no-same-owner --no-same-permissions \
+	|| { rm -rf "$STAGE"; die $E_FS "could not extract the release"; }
+
+[ -f "$work/index.html" ] || { rm -rf "$STAGE"; die $E_INVENTORY "release has no index.html"; }
+[ -f "$work/SHA256SUMS" ] || { rm -rf "$STAGE"; die $E_INVENTORY "release has no SHA256SUMS"; }
+
+# ---- 4. the release describes the commit we were asked for --------
+# SHA256SUMS is the flat, dependency-free manifest. The same inventory is in
+# release.json, which is the copy CI and the public site read.
+declared=$(sed -n 's|.*"source_sha"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{40\}\)".*|\1|p' "$work/release.json" 2>/dev/null | head -1 || true)
+if [ "$declared" != "$SHA" ]; then
+	rm -rf "$STAGE"
+	die $E_INVENTORY "release.json reports commit ${declared:-<none>}, expected $SHA"
+fi
+
+# ---- 5. every served file is the file that was built --------------
+if ! ( cd "$work" && sha256sum -c --quiet SHA256SUMS ); then
+	rm -rf "$STAGE"
+	die $E_INVENTORY "the extracted release does not match its own SHA256SUMS"
+fi
+
+# ---- 6. move it somewhere immutable --------------------------------
+mkdir -p "$RELEASES"
+target="$RELEASES/$SHA"
+if [ -d "$target" ]; then
+	# Releases are named by commit, so this one already exists. It was
+	# immutable when it landed, which means it is already the thing we want;
+	# re-installing would only risk replacing good bytes with equal ones.
+	rm -rf "$STAGE"
+	printf 'release %s already installed; reusing it\n' "$SHA"
+else
+	rm -rf "$target.tmp"
+	mv "$work" "$target.tmp"
+	mv "$target.tmp" "$target"
+	rm -rf "$STAGE"
+	# The archive fixes every file's mtime to the commit date, so every release
+	# directory would otherwise share one timestamp and "keep the newest five"
+	# would be arbitrary — which is how a rollback ends up pointing at the
+	# release that just went out. Stamp the deployment time instead.
+	touch "$target"
+fi
+
+# ---- 7. switch the symlink, atomically -----------------------------
+# Link into a temporary name, then rename over the top: rename(2) within a
+# directory is atomic, so a request either sees the old release complete or the
+# new release complete, never a half-installed mixture. No Caddy reload is
+# needed for this to take effect, because root * is resolved per request.
+ln -sfn "releases/$SHA" "$ROOT/.current.new"
+mv -T "$ROOT/.current.new" "$ROOT/current"
+
+# ---- 8. keep the last few releases, and nothing else ----------------
+# Only ever names directories inside releases/. No find -delete, no glob
+# outside this directory, no touch of `current` or of anything outside it.
+# Newest first by modification time, so the live release and the one before it
+# both survive for rollback.
+cd "$RELEASES"
+ls -1dt */ 2>/dev/null | sed 's|/$||' > "$ROOT/.release-list" || true
+total=$(wc -l < "$ROOT/.release-list" | tr -d ' ')
+if [ "$total" -gt "$KEEP" ]; then
+	sed -n "$((KEEP + 1)),\$p" "$ROOT/.release-list" | while read -r old; do
+		[ -n "$old" ] || continue
+		[ "$old" = "$SHA" ] && continue
+		# Only ever a 40-hex commit directory. Anything else is not ours to
+		# remove, whatever it is or how it got there.
+		if printf '%s' "$old" | grep -Eq '^[0-9a-f]{40}$'; then
+			rm -rf "$RELEASES/$old"
+			printf 'retired old release %s\n' "$old"
+		else
+			printf 'refusing to remove unrecognised entry %s\n' "$old" >&2
+		fi
+	done
+fi
+rm -f "$ROOT/.release-list"
+rm -rf "$STAGE"
+
+printf '%s\n' "$ROOT/current -> releases/$SHA"
+exit 0
