@@ -45,6 +45,7 @@ The build output *is* the document root. Nothing is generated at runtime.
 dist/
 ├── index.html                      one document; the game boots from it
 ├── release.json                    provenance: source sha + a sha256 per file
+├── SHA256SUMS                      the same inventory, in `sha256sum -c` format
 └── assets/
     ├── index-<hash>.js             the whole game (~916 kB, ~249 kB gzipped)
     ├── index-<hash>.css            ~14 kB
@@ -54,9 +55,16 @@ dist/
 Total ~11 MB. Filenames are content-hashed, so `assets/` can be cached forever
 and a new release never needs a cache purge.
 
-`dist/` is gitignored. `release.json` is written after the build by
+`dist/` is gitignored. Both manifests are written after the build by
 `tools/stamp-release.mjs`, never by the game, and `tools/check-dist.mjs` holds
-the result to it.
+the result to them. Neither manifest inventories itself, and re-stamping a
+directory produces the same manifest rather than a corrupt one.
+
+`SHA256SUMS` exists so the server can verify an extracted release with
+coreutils alone. It is there because `sha256sum` is already required to check
+the uploaded tarball, and a static web host has no reason to carry a JSON
+parser. `release.json` is the same inventory in the copy that CI and the public
+site read.
 
 ### Rules the served site has to follow
 
@@ -146,17 +154,22 @@ says so explicitly.
 2. Compute its sha256. If it does not equal `$2`, exit non-zero **having
    changed nothing**.
 3. Extract to `releases/<sha>.incoming` as the deploy user with
-   `umask 022` and `--no-same-owner` (not as root).
+   `umask 022`, `--no-same-owner` and `--no-same-permissions` (not as root).
 4. Read `release.json` from the extracted tree; if `source_sha != $1`, exit
    non-zero and delete the staging directory.
-5. Re-verify every file in that inventory against its recorded sha256 and
-   size. Any mismatch aborts.
+5. Verify every served file against `SHA256SUMS` with `sha256sum -c`. Any
+   failure aborts.
 6. `rename` the staged directory to `releases/<sha>`. Releases are immutable
    and named by commit, so a re-deploy of the same commit is a no-op.
-7. Atomically repoint the symlink:
+7. `touch` the release directory, then switch the symlink atomically. The
+   `touch` matters: the reproducible archive gives every file the commit date,
+   so without it every release directory shares one timestamp and "keep the
+   newest five" becomes arbitrary — which is how a rollback ends up pointing
+   back at the release that just went out.
 
    ```sh
-   ln -sfn "releases/<sha>" "$ROOT/.current.new"
+   touch "releases/$sha"
+   ln -sfn "releases/$sha" "$ROOT/.current.new"
    mv -T "$ROOT/.current.new" "$ROOT/current"
    ```
 
@@ -329,6 +342,11 @@ ls -l current && curl -sI https://misty-bunny.gyute.fyi/ | head -1
 
 Roll forward by deploying again — a re-deploy of any earlier sha reuses that
 commit's existing release directory unchanged.
+
+One caveat: retention is by deploy time, so a release you have rolled *back*
+to is the oldest thing in `releases/` and will be the first one retired if you
+then deploy. Roll forward within a few deploys, or `touch` it, rather than
+sitting on it.
 
 The previous release is always kept (five are retained), so a rollback never
 depends on rebuilding anything.
