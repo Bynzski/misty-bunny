@@ -1,0 +1,68 @@
+#!/bin/sh
+# misty-bunny-gateway — the only thing the deployment key may run.
+#
+#   authorized_keys:  command="/usr/local/sbin/misty-bunny-gateway"
+#   client sends:     ssh … misty-bunny-release <sha> <tarball-sha256>   (tarball on stdin)
+#
+# WHY THIS EXISTS
+#
+# A forced command in authorized_keys is not given the client's arguments:
+# sshd runs the forced command *instead of* what was asked for, and puts the
+# original request in $SSH_ORIGINAL_COMMAND. Pointing command= straight at the
+# installer therefore delivers it zero arguments and every deploy would fail on
+# its usage check.
+#
+# The obvious repair — interpolating $SSH_ORIGINAL_COMMAND into a command line
+# — would hand the client a shell, since that variable is entirely under their
+# control and needs no escaping to contain `;`, `$(…)` or backticks.
+#
+# So this never builds a command string. It splits the original command into
+# positional parameters with `set --` (which performs no expansion of the
+# split words), requires the exact arity and exact shapes it expects, and then
+# `exec`s the installer with arguments that have been checked to be a bare
+# 40-hex commit sha and a bare 64-hex digest. Anything else is refused before
+# the installer runs. The client cannot inject an option, a path or a command,
+# because nothing they sent survives except two hex strings.
+
+set -eu
+
+PROG=misty-bunny-gateway
+INSTALLER=/usr/local/libexec/misty-bunny-release
+
+E_USAGE=2
+
+die() {
+	printf '%s: %s\n' "$PROG" "$*" >&2
+	exit "$E_USAGE"
+}
+
+# Split on whitespace without expanding anything. `set --` on an unquoted
+# variable word-splits it but performs no globbing or command substitution on
+# the results, so a client-supplied `*` or `$(id)` is just a literal word that
+# will fail validation below.
+old_ifs=$IFS
+IFS=' 	
+'
+set -- ${SSH_ORIGINAL_COMMAND:-}
+IFS=$old_ifs
+
+[ $# -eq 3 ] || die "expected 'misty-bunny-release <source-sha> <tarball-sha256>', got $# field(s)"
+
+[ "$1" = "misty-bunny-release" ] || die "unknown command: $1"
+
+# Exactly one field each, and hex only. A leading dash would let a client pass
+# something as a flag to the installer, so the shape check excludes it.
+case "$2" in
+	''|-*) die "source sha must be 40 lowercase hex characters" ;;
+esac
+case "$3" in
+	''|-*) die "tarball sha256 must be 64 lowercase hex characters" ;;
+esac
+
+printf '%s' "$2" | grep -Eq '^[0-9a-f]{40}$' || die "source sha is not 40 lowercase hex characters"
+printf '%s' "$3" | grep -Eq '^[0-9a-f]{64}$' || die "tarball sha256 is not 64 lowercase hex characters"
+
+# Run as the same unprivileged account sshd logged in as; this must not need
+# root, and must not be able to escalate to it.
+[ -x "$INSTALLER" ] || die "installer $INSTALLER is missing or not executable"
+exec "$INSTALLER" "$2" "$3"

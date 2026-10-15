@@ -132,11 +132,15 @@ The key is written to a `0600` file inside `RUNNER_TEMP`, used only via
 every exit path.
 
 **Host-key pinning is by fingerprint, not by TOFU.** The workflow scans the
-key, computes its SHA256 fingerprint, and aborts unless it equals
-`MISTY_BUNNY_SSH_HOST_KEY_SHA256`. `StrictHostKeyChecking=yes` with a
-throwaway `UserKnownHostsFile`. Nothing anywhere sets
-`StrictHostKeyChecking=no`. If the server key ever rotates, that variable has to
-be updated deliberately.
+candidate keys, computes each SHA256 fingerprint, and **writes only the keys
+whose fingerprint appears in `MISTY_BUNNY_SSH_HOST_KEY_SHA256` into
+`known_hosts`**. Unmatched keys are discarded, not merely reported: if they
+were left in the file, a host presenting one matching key alongside one
+substituted key would get both trusted on a later connection, which defeats
+the pinning. The workflow aborts if no fingerprint matched, or if `known_hosts`
+ends up empty. `StrictHostKeyChecking=yes` throughout, with a throwaway
+`UserKnownHostsFile`. Nothing anywhere sets `StrictHostKeyChecking=no`. If the
+server key ever rotates, that variable has to be updated deliberately.
 
 ## 5. The server-side entry point
 
@@ -154,14 +158,67 @@ The existing Gyute/Disc It deploy command is **not** assumed to accept this
 game — the contract above is a proposal, and the workflow's failure message
 says so explicitly.
 
+### Why there is a gateway and not just a forced command
+
+A `command=` entry in `authorized_keys` is **not given the client's
+arguments**. sshd runs the forced command *instead of* the one requested and
+puts the original request in `$SSH_ORIGINAL_COMMAND`. So
+
+```
+command="/usr/local/libexec/misty-bunny-release"
+```
+
+would run the installer with **zero** arguments and every deploy would die on
+its `[ $# -eq 2 ]` usage check. This is a functional break, not a hardening
+detail.
+
+The tempting fix — `command="/bin/sh -c '$SSH_ORIGINAL_COMMAND'"` — hands the
+client a shell, because that variable is entirely under their control and
+needs no escaping to contain `;`, `$(…)` or backticks.
+
+`misty-bunny-gateway` therefore never builds a command string. It splits
+`$SSH_ORIGINAL_COMMAND` into positional parameters with `set --` (word
+splitting, but no globbing or command substitution on the results), requires
+exactly three fields, requires the first to be the literal program name, and
+requires the other two to match `^[0-9a-f]{40}$` and `^[0-9a-f]{64}$`. It
+then `exec`s the installer with two validated arguments. A leading `-` is
+rejected outright so a client cannot smuggle in an option.
+
+Verified against command substitution, backticks, `;` chains, embedded
+newlines, pipes, leading-dash options, absolute paths, `FOO=bar` prefixes,
+globs and quote-breaking: all refused with exit 2, and the installer sees only
+two hex strings.
+
+The account's shell is `/usr/sbin/nologin`, which is compatible with a forced
+command: sshd never starts an interactive login for a `command=` key, so
+`nologin` does not interfere.
+
+Reference implementations of both programs are in `deploy/` in this
+repository. They are a starting point for review, not finished artefacts —
+Fred owns the server integration and should apply them under his own change
+control. Both have been exercised locally against hostile inputs, but
+**neither has ever been run on the production VPS.**
+
 ### Required behaviour
 
+0. Take an exclusive lock (`flock`) on `$ROOT/.deploy.lock` before touching
+   the staging directory, and hold it until exit. The staging path is fixed,
+   so two overlapping deployments would otherwise delete each other's staging
+   tree mid-flight — and because the failure would land between extract and
+   publish, that is a way to make one release the contents of another.
 1. Read stdin to a temporary file inside the deploy user's own staging
    directory. Never write anywhere else, and never as another user.
 2. Compute its sha256. If it does not equal `$2`, exit non-zero **having
    changed nothing**.
-3. Extract to `releases/<sha>.incoming` as the deploy user with
-   `umask 022`, `--no-same-owner` and `--no-same-permissions` (not as root).
+3. **Inspect the archive before extracting anything.** List it with
+   `tar -tzf` and reject the upload unless every entry is a relative path
+   under the archive root — no absolute paths, no `..` component anywhere —
+   and list it with `tar -tvzf` to reject anything that is not a regular file
+   or a directory (symlinks, hardlinks, devices, fifos). Then require the
+   top level to be exactly `index.html`, `SHA256SUMS`, `release.json` and
+   `assets/`. Only then extract. `tar` will happily write outside the
+   directory it is given, and a checksum proves only that the client sent what
+   it said it sent, never that the result is safe to unpack.
 4. Read `release.json` from the extracted tree; if `source_sha != $1`, exit
    non-zero and delete the staging directory.
 5. Verify every served file against `SHA256SUMS` with `sha256sum -c`. Any
@@ -170,9 +227,9 @@ says so explicitly.
    and named by commit, so a re-deploy of the same commit is a no-op.
 7. `touch` the release directory, then switch the symlink atomically. The
    `touch` matters: the reproducible archive gives every file the commit date,
-   so without it every release directory shares one timestamp and "keep the
-   newest five" becomes arbitrary — which is how a rollback ends up pointing
-   back at the release that just went out.
+   so without it every release directory shares one timestamp and any ordering
+   derived from directory timestamps becomes arbitrary — which is how a
+   rollback ends up pointing back at the release that just went out.
 
    ```sh
    touch "releases/$sha"
@@ -180,10 +237,16 @@ says so explicitly.
    mv -T "$ROOT/.current.new" "$ROOT/current"
    ```
 
-8. Keep the five most recent releases. **Never** delete anything outside
-   `releases/`, never delete `current`, never do a broad `find -delete`.
-   Persistent data does not exist for this game, so there is nothing to prune
-   beyond release directories.
+8. **Delete nothing.** Retention is off unless `MISTY_BUNNY_PRUNE=1` is set
+   explicitly, which the initial rollout does not do. Deleting on the strength
+   of a directory timestamp is the only irreversible thing here, it is not
+   needed to launch (a release is ~10 MB), and keeping every release makes
+   rollback a non-event. When it is enabled, protect the live release and the
+   release a rollback would land on **by name**, not by position in a
+   timestamp-sorted list, so a clock jump or an mtime restored from backup
+   cannot retire the release you would roll back to. Only ever delete 40-hex
+   commit directories inside `releases/`; never a broad `find -delete`, never
+   anything outside `releases/`, never `current`.
 9. Print the resolved `current` path on stdout and exit 0.
 
 Exit codes: `0` success, `2` usage, `3` tarball checksum mismatch, `4` release
@@ -194,35 +257,40 @@ resolves through the symlink per request, so the swap is visible to the next
 request and in-flight requests finish against the old files. This is the point
 of the atomic rename.
 
-A reference implementation is in `deploy/misty-bunny-release` in this
-repository. It is a starting point for review, not a finished artefact —
-Fred owns the server integration and should apply it under his own change
-control.
+Two programs are installed:
 
-## 6. Identity and permissions
+| Path | Owner | Mode | Role |
+|---|---|---|---|
+| `/usr/local/sbin/misty-bunny-gateway` | root:root | `0755` | the forced command; parses `SSH_ORIGINAL_COMMAND` and execs the installer |
+| `/usr/local/libexec/misty-bunny-release` | root:root | `0755` | the installer; runs as `misty-bunny-deploy` |
 
 ```sh
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin misty-bunny-deploy
 sudo install -d -o misty-bunny-deploy -g misty-bunny-deploy -m 0755 \
      /srv/games/misty-bunny/releases
+sudo install -o root -g root -m 0755 deploy/misty-bunny-gateway   /usr/local/sbin/misty-bunny-gateway
+sudo install -o root -g root -m 0755 deploy/misty-bunny-release  /usr/local/libexec/misty-bunny-release
 ```
 
 The deploy user owns `releases/` outright. **No `sudoers` entry, no root, no
 group gymnastics** — it writes only inside a directory it owns, and Caddy
-reaches the result read-only through the `current` symlink. Mode `0755`/
-`0644` (from `umask 022`) is what makes the install permissions-safe for Caddy
+reaches the result read-only through the `current` symlink. Mode `0755`/`0644`
+(from `umask 022`) is what makes the install permissions-safe for Caddy
 without granting the deploy account anything over the rest of the box.
+
+Both programs are **root-owned and not writable by the deploy user**. That
+matters: the confinement below is only real if the account being confined
+cannot edit the program doing the confining.
 
 `authorized_keys` for the deploy user — one line, no wildcards:
 
 ```
-restrict,from="<GitHub Actions published CIDRs>",command="/usr/local/sbin/misty-bunny-release" ssh-ed25519 AAAA… misty-bunny-deploy
+restrict,from="<GitHub Actions published CIDRs>",command="/usr/local/sbin/misty-bunny-gateway" ssh-ed25519 AAAA… misty-bunny-deploy
 ```
 
 - `restrict` — no PTY, no agent forwarding, no port forwarding, no X11,
   no user rc.
-- `command=` — the account can only ever run this one program with the
-  arguments the workflow supplies.
+- `command=` — the account can only ever run the gateway.
 - `from=` — GitHub publishes its runner egress ranges at
   `https://api.github.com/meta` under `actions`. Pin them; they change rarely
   and the change is announced. The line gets long, which is fine.
@@ -350,13 +418,11 @@ ls -l current && curl -sI https://misty-bunny.gyute.fyi/ | head -1
 Roll forward by deploying again — a re-deploy of any earlier sha reuses that
 commit's existing release directory unchanged.
 
-One caveat: retention is by deploy time, so a release you have rolled *back*
-to is the oldest thing in `releases/` and will be the first one retired if you
-then deploy. Roll forward within a few deploys, or `touch` it, rather than
-sitting on it.
-
-The previous release is always kept (five are retained), so a rollback never
-depends on rebuilding anything.
+Nothing is deleted in the initial rollout: `MISTY_BUNNY_PRUNE` is unset, so
+every release ever deployed is still on disk and any of them can be rolled back
+to with the same two commands. If retention is enabled later, the live release
+and the one a rollback would land on are protected by name, so this caveat
+disappears with it.
 
 ## 10. What this does not do
 

@@ -20,7 +20,7 @@
 set -eu
 
 ROOT=${MISTY_BUNNY_ROOT:-/srv/games/misty-bunny}
-KEEP=${MISTY_BUNNY_KEEP:-5}      # releases retained for rollback
+KEEP=${MISTY_BUNNY_KEEP:-10}     # only consulted when MISTY_BUNNY_PRUNE=1
 
 E_USAGE=2
 E_CHECKSUM=3
@@ -44,8 +44,24 @@ printf '%s' "$SUM" | grep -Eq '^[0-9a-f]{64}$' || die $E_USAGE "tarball sha256 m
 RELEASES="$ROOT/releases"
 STAGE="$ROOT/.incoming"
 
-# Anything already staged by a previous, interrupted run is ours to clear: it
-# is inside the staging directory and nothing outside it is ever removed.
+# ---- serialise -----------------------------------------------------------
+# The staging directory is a fixed path, so two deployments overlapping would
+# otherwise delete each other's staging tree mid-flight — and because the
+# failure lands between "extract" and "publish", that is a way to make one
+# release the contents of another. One deployment at a time, per host.
+LOCK="$ROOT/.deploy.lock"
+mkdir -p "$ROOT"
+: >> "$LOCK"
+chmod 600 "$LOCK"
+if command -v flock >/dev/null 2>&1; then
+	exec 9>"$LOCK"
+	flock -w "${MISTY_BUNNY_LOCK_WAIT:-300}" 9 \
+		|| die $E_FS "another deployment holds the lock; waited ${MISTY_BUNNY_LOCK_WAIT:-300}s"
+fi
+
+# Anything left by a previous, interrupted run is ours to clear: it is inside
+# the staging directory and nothing outside it is ever removed. Safe now that
+# the lock is held.
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
 
@@ -64,7 +80,80 @@ if [ "$actual" != "$SUM" ]; then
 	die $E_CHECKSUM "tarball sha256 $actual does not match the declared $SUM"
 fi
 
-# ---- 3. unpack into a staging directory, as this user --------------
+# ---- 3. inspect the archive BEFORE unpacking anything ----------------
+# tar happily writes outside the directory it was told to use: absolute paths,
+# "../" traversal, and symlinks or hardlinks that redirect a later write
+# somewhere else entirely. This release is a fixed, known set of regular files
+# and directories, so the archive is held to exactly that before a single byte
+# is extracted. Nothing is trusted because of who sent it — the checksum above
+# proves the client sent what they said they sent, not that it was safe to
+# unpack.
+listing="$STAGE/listing"
+if ! tar -tzf "$tarball" > "$listing" 2>/dev/null; then
+	rm -rf "$STAGE"
+	die $E_INVENTORY "the uploaded file is not a readable gzip tarball"
+fi
+
+# Reject anything that is not a plain path under the archive root.
+while IFS= read -r entry; do
+	[ -n "$entry" ] || continue
+	# Strip a leading "./" so the common case reads naturally below.
+	name=${entry#./}
+	case "$name" in
+		'')
+			continue
+			;;
+		# absolute, traversing, or with a "../" component anywhere
+		/*|'../'*|*'/../'*|*'/..')
+			rm -rf "$STAGE"
+			die $E_INVENTORY "archive entry escapes the release root: $entry"
+			;;
+	esac
+done < "$listing"
+
+# Reject entries that are not regular files or directories. A symlink or
+# hardlink in a release is never legitimate here, and is the usual way an
+# archive tries to make the extractor write outside the staging tree.
+vlist="$STAGE/verbose"
+if tar -tvzf "$tarball" > "$vlist" 2>/dev/null; then
+	bad=$(awk '
+		{
+			# first field is the mode string; its first character is the type
+			t = substr($1, 1, 1)
+			if (t != "-" && t != "d") print
+		}' "$vlist")
+	if [ -n "$bad" ]; then
+		rm -rf "$STAGE"
+		die $E_INVENTORY "archive contains a link or special file:"$'\n'"$bad"
+	fi
+fi
+
+# Reject unexpected top-level entries. The release is index.html, SHA256SUMS,
+# release.json and assets/ — anything else is not this game and must not be
+# published, whatever it is called.
+unexpected=$(
+	# Normalise to a bare top-level name: strip "./" and anything after the
+	# first slash. `tar -C dist .` emits a literal "." entry for the root,
+	# which is the archive's own directory and not an unexpected file.
+	sed 's|^\./||' "$listing" |
+	awk -F/ 'NF { print $1 }' |
+	grep -vxF -e '.' -e '..' | sort -u |
+	grep -vxF -e index.html -e SHA256SUMS -e release.json -e assets || true
+)
+if [ -n "$unexpected" ]; then
+	rm -rf "$STAGE"
+	die $E_INVENTORY "archive contains unexpected top-level entries:"$'\n'"$unexpected"
+fi
+
+for required in index.html SHA256SUMS release.json; do
+	if ! sed 's|^\./||' "$listing" | grep -qxF "$required"; then
+		rm -rf "$STAGE"
+		die $E_INVENTORY "archive is missing $required"
+	fi
+done
+rm -f "$listing" "$vlist"
+
+# ---- 4. unpack into a staging directory, as this user --------------
 work="$STAGE/tree"
 mkdir -p "$work"
 # --no-same-owner because this user is not root and must not pretend to be;
@@ -74,8 +163,9 @@ tar -xzf "$tarball" -C "$work" --no-same-owner --no-same-permissions \
 
 [ -f "$work/index.html" ] || { rm -rf "$STAGE"; die $E_INVENTORY "release has no index.html"; }
 [ -f "$work/SHA256SUMS" ] || { rm -rf "$STAGE"; die $E_INVENTORY "release has no SHA256SUMS"; }
+[ -f "$work/release.json" ] || { rm -rf "$STAGE"; die $E_INVENTORY "release has no release.json"; }
 
-# ---- 4. the release describes the commit we were asked for --------
+# ---- 5. the release describes the commit we were asked for --------
 # SHA256SUMS is the flat, dependency-free manifest. The same inventory is in
 # release.json, which is the copy CI and the public site read.
 declared=$(sed -n 's|.*"source_sha"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{40\}\)".*|\1|p' "$work/release.json" 2>/dev/null | head -1 || true)
@@ -84,7 +174,7 @@ if [ "$declared" != "$SHA" ]; then
 	die $E_INVENTORY "release.json reports commit ${declared:-<none>}, expected $SHA"
 fi
 
-# ---- 5. every served file is the file that was built --------------
+# ---- 6. every served file is the file that was built --------------
 if ! ( cd "$work" && sha256sum -c --quiet SHA256SUMS ); then
 	rm -rf "$STAGE"
 	die $E_INVENTORY "the extracted release does not match its own SHA256SUMS"
@@ -119,29 +209,57 @@ fi
 ln -sfn "releases/$SHA" "$ROOT/.current.new"
 mv -T "$ROOT/.current.new" "$ROOT/current"
 
-# ---- 8. keep the last few releases, and nothing else ----------------
-# Only ever names directories inside releases/. No find -delete, no glob
-# outside this directory, no touch of `current` or of anything outside it.
-# Newest first by modification time, so the live release and the one before it
-# both survive for rollback.
-cd "$RELEASES"
-ls -1dt */ 2>/dev/null | sed 's|/$||' > "$ROOT/.release-list" || true
-total=$(wc -l < "$ROOT/.release-list" | tr -d ' ')
-if [ "$total" -gt "$KEEP" ]; then
-	sed -n "$((KEEP + 1)),\$p" "$ROOT/.release-list" | while read -r old; do
-		[ -n "$old" ] || continue
-		[ "$old" = "$SHA" ] && continue
-		# Only ever a 40-hex commit directory. Anything else is not ours to
-		# remove, whatever it is or how it got there.
-		if printf '%s' "$old" | grep -Eq '^[0-9a-f]{40}$'; then
-			rm -rf "$RELEASES/$old"
-			printf 'retired old release %s\n' "$old"
-		else
-			printf 'refusing to remove unrecognised entry %s\n' "$old" >&2
-		fi
-	done
+# ---- 8. retention ----------------------------------------------------
+#
+# OFF by default, deliberately.
+#
+# Deleting anything on the strength of a directory timestamp is the one part of
+# this script that cannot be undone, and it is not needed to launch: releases
+# are a few megabytes each, and keeping every one of them makes rollback a
+# non-event. So the first rollout deletes nothing at all, and retention becomes
+# a separate, reviewed decision once the site has run for a while and there is
+# a real number behind "keep N".
+#
+# To enable it later, set MISTY_BUNNY_PRUNE=1 and MISTY_BUNNY_KEEP=N. Even
+# then, the live release and the one it replaced are protected by name rather
+# than by position in a timestamp-sorted list, so a clock jump or an mtime
+# preserved by a restore cannot retire the release you would roll back to.
+if [ "${MISTY_BUNNY_PRUNE:-0}" = "1" ]; then
+	cd "$RELEASES" || die $E_FS "cannot read $RELEASES"
+	# What `current` points at right now, and what it pointed at before this
+	# deployment, read from the release directory itself rather than inferred.
+	live=$(basename "$(readlink -f "$ROOT/current" 2>/dev/null)" 2>/dev/null || true)
+	previous=$SHA
+	# The newest release other than the one just deployed is the one a
+	# rollback would land on, and it is protected explicitly below.
+	newest_other=$(
+		ls -1dt */ 2>/dev/null | sed 's|/$||' | grep -vxF "$SHA" | head -1 || true
+	)
+
+	total=$(find "$RELEASES" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')
+	if [ "$total" -gt "$KEEP" ]; then
+		ls -1dt */ 2>/dev/null | sed 's|/$||' | tail -n "+$((KEEP + 1))" |
+		while read -r old; do
+			[ -n "$old" ] || continue
+			# Never retire the live release or the rollback target.
+			if [ "$old" = "$live" ] || [ "$old" = "$newest_other" ]; then
+				printf 'keeping protected release %s\n' "$old"
+				continue
+			fi
+			# Only ever a 40-hex commit directory. Anything else is not ours
+			# to remove, whatever it is or how it got there.
+			if printf '%s' "$old" | grep -Eq '^[0-9a-f]{40}$'; then
+				rm -rf "$RELEASES/$old"
+				printf 'retired old release %s\n' "$old"
+			else
+				printf 'refusing to remove unrecognised entry %s\n' "$old" >&2
+			fi
+		done
+	fi
+	unset previous
+else
+	printf 'retention disabled (MISTY_BUNNY_PRUNE unset); no releases removed\n'
 fi
-rm -f "$ROOT/.release-list"
 rm -rf "$STAGE"
 
 printf '%s\n' "$ROOT/current -> releases/$SHA"

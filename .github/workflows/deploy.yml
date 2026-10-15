@@ -122,6 +122,15 @@ jobs:
       group: misty-bunny-production
       cancel-in-progress: false
     steps:
+      # tools/verify-live.mjs is the post-deployment check and lives in the
+      # repository, so this job needs the source as well as the artifact. The
+      # download alone is not enough — the verification step would have nothing
+      # to run.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
       - uses: actions/download-artifact@v8
         with:
           name: misty-bunny-release
@@ -151,11 +160,15 @@ jobs:
           printf '%s\n' "$KEYFILE" > "${RUNNER_TEMP}/ssh/id_ed25519"
           chmod 600 "${RUNNER_TEMP}/ssh/id_ed25519"
 
-      # Host key pinning by fingerprint. `ssh-keyscan` is only used as a way of
-      # *obtaining* the key; the key is not trusted because it was scanned, it
-      # is trusted because its SHA256 fingerprint has to equal the one recorded
-      # in the repository. A changed key aborts the deploy — which is what makes
-      # TOFU safe here.
+      # Host key pinning by fingerprint.
+      #
+      # `ssh-keyscan` is only a way of *obtaining* candidate keys; none of them
+      # is trusted for having been scanned. Every scanned key is fingerprinted,
+      # and only the ones whose SHA256 fingerprint appears in the pinned set are
+      # written to known_hosts. An unmatched key is discarded, not merely
+      # reported — otherwise a host presenting one matching key alongside one
+      # substituted key would get both written to known_hosts and trusted on a
+      # later connection. That is what makes pinning safer than TOFU here.
       - name: Pin the server host key
         env:
           SSH_HOST: ${{ vars.MISTY_BUNNY_SSH_HOST }}
@@ -164,30 +177,50 @@ jobs:
         run: |
           set -euo pipefail
           known="${RUNNER_TEMP}/ssh/known_hosts"
-          : > "$known"
+          scanned="${RUNNER_TEMP}/ssh/scanned"
+          install -d -m 700 "${RUNNER_TEMP}/ssh"
+          : > "$scanned"
           for algo in ed25519 rsa ecdsa; do
-            ssh-keyscan -T 15 -p "${SSH_PORT:-22}" -t "$algo" "$SSH_HOST" 2>/dev/null >> "$known" || true
+            ssh-keyscan -T 15 -p "${SSH_PORT:-22}" -t "$algo" "$SSH_HOST" 2>/dev/null >> "$scanned" || true
           done
-          if [ ! -s "$known" ]; then echo "::error::could not reach $SSH_HOST:${SSH_PORT:-22}"; exit 1; fi
+          if [ ! -s "$scanned" ]; then echo "::error::could not reach $SSH_HOST:${SSH_PORT:-22}"; exit 1; fi
 
           expected="$(printf '%s' "$EXPECTED" | tr ',' '\n' | sed 's/^ *//;s/ *$//' | grep -v '^$' || true)"
-          matched=0
+
+          # Rebuild known_hosts from scratch, containing only verified entries.
+          : > "$known"
+          verified=0
+          seen=''
           while read -r line; do
-            fp="$(ssh-keygen -lf /dev/stdin <<<"$line" -E sha256 | awk '{print $2}')"
+            [ -n "$line" ] || continue
+            case "$seen" in
+              *"|$line|"*) continue ;;   # ssh-keyscan can repeat a key per algo
+            esac
+            seen="$seen|$line|"
+            fp="$(ssh-keygen -lf /dev/stdin <<<"$line" -E sha256 2>/dev/null | awk '{print $2}')"
             [ -n "$fp" ] || continue
             if printf '%s\n' "$expected" | grep -qxF "$fp"; then
+              printf '%s\n' "$line" >> "$known"
               echo "::notice::pinned host key matches $fp"
-              matched=1
+              verified=$((verified + 1))
             else
-              echo "::error::host key does not match the pinned fingerprint: $fp"
+              echo "::warning::discarding unpinned host key ${fp} — not in MISTY_BUNNY_SSH_HOST_KEY_SHA256"
             fi
-          done < "$known"
+          done < "$scanned"
 
-          if [ "$matched" -ne 1 ]; then
+          rm -f "$scanned"
+
+          if [ "$verified" -lt 1 ]; then
             echo "::error::no pinned host key fingerprint matched — refusing to deploy"
             echo "If the server key genuinely rotated, update MISTY_BUNNY_SSH_HOST_KEY_SHA256 deliberately."
             exit 1
           fi
+          if [ ! -s "$known" ]; then
+            echo "::error::known_hosts is empty after verification — refusing to deploy"
+            exit 1
+          fi
+          chmod 600 "$known"
+          echo "::notice::$verified pinned host key(s) written to known_hosts"
 
       - name: Deploy
         env:
