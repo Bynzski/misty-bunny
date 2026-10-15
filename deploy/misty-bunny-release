@@ -129,8 +129,17 @@ if tar -tvzf "$tarball" > "$vlist" 2>/dev/null; then
 fi
 
 # Reject unexpected top-level entries. The release is index.html, SHA256SUMS,
-# release.json and assets/ — anything else is not this game and must not be
-# published, whatever it is called.
+# release.json, assets/, og.jpg and apple-touch-icon.png — anything else is not
+# this game and must not be published, whatever it is called.
+#
+# og.jpg and apple-touch-icon.png are the social card and the iOS icon. They sit
+# at fixed paths rather than inside assets/ because a crawler requests them by
+# name and never reads the manifest that knows a content hash.
+#
+# KEEP IN STEP WITH TOP_LEVEL in tools/check-dist.mjs. That allowlist is the
+# build-time copy of this one; check-dist.mjs asserts the two agree, so a
+# release that passes CI cannot be refused here for shipping a file this list
+# has not heard of.
 unexpected=$(
 	# Normalise to a bare top-level name: strip "./" and anything after the
 	# first slash. `tar -C dist .` emits a literal "." entry for the root,
@@ -138,7 +147,8 @@ unexpected=$(
 	sed 's|^\./||' "$listing" |
 	awk -F/ 'NF { print $1 }' |
 	grep -vxF -e '.' -e '..' | sort -u |
-	grep -vxF -e index.html -e SHA256SUMS -e release.json -e assets || true
+	grep -vxF -e index.html -e SHA256SUMS -e release.json -e assets \
+		-e og.jpg -e apple-touch-icon.png || true
 )
 if [ -n "$unexpected" ]; then
 	rm -rf "$STAGE"
