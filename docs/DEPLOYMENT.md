@@ -475,3 +475,29 @@ Two consequences worth knowing:
 To change the card, edit the layout in `tools/og-image.mjs`, run `npm run og`,
 and rebuild. Both files sit at fixed paths outside `assets/` because a crawler
 requests them by convention and never reads the hashed manifest.
+
+### The two allowlists
+
+There are two lists of what may exist at the top of a release, and they have to
+agree:
+
+| | file | run by |
+|---|---|---|
+| build-time | `tools/check-dist.mjs` (`TOP_LEVEL`) | every build, and CI |
+| server-side | `deploy/misty-bunny-release` (`grep -vxF`) | the server, on arrival |
+
+The server refuses any archive whose top level its own list does not permit,
+and it does so after the build has passed, after the artifact has been uploaded
+and after every CI run has gone green. Widening only the first produced
+exactly that: the release for the social card passed the audit, was accepted by
+CI, and came back `exit 4` from production.
+
+`check-dist.mjs` now compares the two directly and fails if either has a name
+the other does not — in both directions, because a name allowed only on the
+server is a way to publish something the audit would have refused. If you add
+a top-level file, add it to both, and let the check confirm you did.
+
+`favicon.ico` was named in the build-time list and neither. Nothing generated
+it and nothing referenced it, so it was removed rather than reconciled: the
+server was always going to refuse it, and an allowlist should not name a file
+nobody ships.

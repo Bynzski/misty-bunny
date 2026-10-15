@@ -21,7 +21,8 @@
  */
 import { readdirSync, readFileSync, statSync, existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { join, posix } from 'node:path';
+import { join, posix, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const argv = process.argv.slice(2);
 const arg = (name, dflt = null) => {
@@ -57,12 +58,44 @@ const ok = (name, cond, extra = '') => {
  * be content-hashed into assets/ and referenced from a hashed URL, because the
  * crawler that wants them never reads the manifest that knows the hash. Both
  * are generated and committed by tools/og-image.mjs.
+ *
+ * This list is the build-time half of a pair. deploy/misty-bunny-release holds
+ * the server-side half, and the server refuses any archive whose top level
+ * this list does not also permit. They are checked against each other below,
+ * because the two live in different files, one is not run by CI, and a release
+ * that passes the audit here can still be refused on arrival there.
+ *
+ * `favicon.ico` was listed here once and in neither half of the pair: nothing
+ * generates it and nothing references it, since the icon is an inline SVG data
+ * URI. It is gone rather than reconciled, because the server was always going
+ * to refuse it and an allowlist should not name a file nobody ships.
  */
 const TOP_LEVEL = new Set([
-  'index.html', 'assets', 'release.json', 'SHA256SUMS', 'favicon.ico',
+  'index.html', 'assets', 'release.json', 'SHA256SUMS',
   'og.jpg', 'apple-touch-icon.png',
 ]);
 const ASSET_EXT = new Set(['.png', '.jpg', '.jpeg', '.webp', '.avif', '.svg', '.css', '.js', '.woff', '.woff2', '.ico']);
+
+/**
+ * The names the server-side installer accepts, read out of
+ * deploy/misty-bunny-release rather than restated here.
+ *
+ * Restating them would be a third copy to keep in step. Instead the grep -vxF
+ * line is parsed directly: it is the whole allowlist, it is the thing that has
+ * to change when the release gains a top-level file, and it cannot drift from
+ * this check because it is the source of the comparison.
+ */
+function serverAllowlist() {
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'deploy', 'misty-bunny-release'), 'utf8');
+  const block = src.match(/grep\s+-vxF\s+((?:[^\n]|\\\n)*?)\s*\|\|\s*true/);
+  if (!block) return null;
+  const names = block[1]
+    .replace(/\\\n\s*/g, ' ')                       // join a continued line
+    .split(/\s+/)
+    .map((s) => s.replace(/^-e\s*/, ''))
+    .filter((s) => s && s !== '.' && s !== '..');
+  return new Set(names);
+}
 
 /** Filenames and directories that must never reach a public release. */
 const FORBIDDEN = [
@@ -110,6 +143,34 @@ for (const f of files) {
   for (const [re, why] of FORBIDDEN) {
     if (re.test(f.rel)) ok(`${f.rel} is not shipped`, false, why);
   }
+}
+
+/*
+ * The build-time and server-side allowlists have to agree.
+ *
+ * This check exists because they once did not. The social card widened
+ * TOP_LEVEL here, the release passed this audit and every CI run, and was then
+ * refused on arrival by the installer with exit 4 — a deployment failure that
+ * no amount of local testing could have predicted, because the file holding
+ * the second list is not run by anything in this repository.
+ *
+ * So the two are compared directly, and the comparison fails in both
+ * directions on purpose. A name allowed here but not by the server builds a
+ * release that cannot be deployed. A name allowed by the server but not here
+ * is a hole: something could be uploaded and published that this audit would
+ * have refused to ship.
+ */
+const server = serverAllowlist();
+ok('the server-side allowlist could be read from deploy/misty-bunny-release', !!server);
+if (server) {
+  const allowedHereOnly = [...TOP_LEVEL].filter((n) => !server.has(n));
+  const allowedThereOnly = [...server].filter((n) => !TOP_LEVEL.has(n));
+  ok('every top-level name allowed here is also accepted by the server',
+    allowedHereOnly.length === 0,
+    allowedHereOnly.join(', ') + ' — deploy/misty-bunny-release would reject the archive');
+  ok('the server accepts nothing this audit would refuse',
+    allowedThereOnly.length === 0,
+    allowedThereOnly.join(', ') + ' — not on TOP_LEVEL');
 }
 
 for (const f of files) {
