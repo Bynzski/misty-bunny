@@ -64,16 +64,23 @@ jobs:
           sha="$(git rev-parse HEAD)"
           test "$sha" = "${{ github.sha }}" || { echo "checkout is $sha, expected ${{ github.sha }}"; exit 1; }
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          # Exported here rather than in the step that stamps, because GITHUB_ENV
+          # only reaches *later* steps — setting it next to its first use meant
+          # the manifest silently fell back to a wall clock and the release
+          # stopped being reproducible.
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
 
       - name: Stamp the release with its provenance
         run: |
-          echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
           node tools/stamp-release.mjs \
             --sha "${{ steps.ident.outputs.sha }}" \
             --ref "${{ github.ref_name }}"
 
       - name: Audit the release
-        run: node tools/check-dist.mjs --require-release --expect-sha "${{ steps.ident.outputs.sha }}"
+        run: |
+          node tools/check-dist.mjs \
+            --require-release --require-reproducible \
+            --expect-sha "${{ steps.ident.outputs.sha }}"
 
       # Reproducible archive: fixed order, fixed owner, fixed mtime, so the
       # same commit always produces the same bytes and therefore the same

@@ -33,6 +33,7 @@ const flag = (name) => argv.includes('--' + name);
 const DIST = arg('dist', 'dist');
 const EXPECT_SHA = arg('expect-sha', null);
 const REQUIRE_RELEASE = flag('require-release');
+const REQUIRE_REPRODUCIBLE = flag('require-reproducible');
 
 const SITE = 'https://misty-bunny.gyute.fyi/';
 const TITLE = 'Misty Bunny';
@@ -197,6 +198,12 @@ if (!byRel.has('release.json')) {
       typeof rel.source_sha === 'string' && /^[0-9a-f]{40}$/.test(rel.source_sha), rel.source_sha);
     ok('release.json records a build time',
       typeof rel.built_at === 'string' && !Number.isNaN(Date.parse(rel.built_at)), rel.built_at);
+    // A wall-clock stamp in the manifest is the one thing that stops the same
+    // commit producing the same bytes twice, so a release that claims to be
+    // reproducible has to have been stamped from SOURCE_DATE_EPOCH.
+    if (REQUIRE_REPRODUCIBLE) {
+      ok('release.json is stamped from SOURCE_DATE_EPOCH (reproducible)', rel.reproducible === true);
+    }
     ok('release.json inventories some files', Array.isArray(rel.files) && rel.files.length > 0);
 
     if (EXPECT_SHA) {
