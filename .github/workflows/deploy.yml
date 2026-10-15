@@ -67,6 +67,7 @@ jobs:
 
       - name: Stamp the release with its provenance
         run: |
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
           node tools/stamp-release.mjs \
             --sha "${{ steps.ident.outputs.sha }}" \
             --ref "${{ github.ref_name }}"
@@ -76,13 +77,15 @@ jobs:
 
       # Reproducible archive: fixed order, fixed owner, fixed mtime, so the
       # same commit always produces the same bytes and therefore the same
-      # sha256. gzip's own header timestamp is pinned by GZIP=-n.
+      # sha256. SOURCE_DATE_EPOCH (set when the release was stamped above) keeps
+      # the manifest itself from carrying a wall clock. gzip's own header
+      # timestamp is pinned by GZIP=-n.
       - name: Package the release
         run: |
           set -euo pipefail
           echo "GZIP=-n" >> "$GITHUB_ENV"
           tar --sort=name --owner=0 --group=0 --numeric-owner \
-              --mtime="@$(git log -1 --pretty=%ct)" \
+              --mtime="@${SOURCE_DATE_EPOCH}" \
               -czf "${RUNNER_TEMP}/misty-bunny.tar.gz" -C dist .
           sha256sum "${RUNNER_TEMP}/misty-bunny.tar.gz" | tee "${RUNNER_TEMP}/misty-bunny.tar.gz.sha256"
 

@@ -61,11 +61,28 @@ const files = walk(DIST)
     sha256: createHash('sha256').update(readFileSync(f.abs)).digest('hex'),
   }));
 
+/**
+ * When the release was stamped.
+ *
+ * Honours SOURCE_DATE_EPOCH, which is what makes a release reproducible: the
+ * whole point of pinning the archive's order, ownership and mtime is defeated
+ * by a wall-clock stamp in the manifest, because two builds of the same commit
+ * would produce two different tarballs and two different sha256s. Under CI the
+ * epoch is the commit time, so the manifest is a property of the source rather
+ * than of whenever it happened to be run. Without it this is the wall clock and
+ * the build is not reproducible.
+ */
+const epoch = Number(process.env.SOURCE_DATE_EPOCH);
+const stampedAt = Number.isFinite(epoch) && epoch > 0
+  ? new Date(epoch * 1000).toISOString()
+  : new Date().toISOString();
+
 const manifest = {
   name: 'Misty Bunny',
   source_sha: SHA,
   source_ref: REF,
-  built_at: new Date().toISOString(),
+  built_at: stampedAt,
+  reproducible: Number.isFinite(epoch) && epoch > 0,
   node: process.version,
   file_count: files.length,
   total_bytes: files.reduce((n, f) => n + f.bytes, 0),

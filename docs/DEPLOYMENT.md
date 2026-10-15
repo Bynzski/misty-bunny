@@ -30,12 +30,19 @@ from the uncommitted odometer-wheel work in the working tree is included; see
 ```bash
 npm ci                 # from package-lock.json; this is what CI runs
 npm run build          # vite build -> dist/
+export SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)
 npm run stamp -- --sha "$(git rev-parse HEAD)" --ref "$(git rev-parse --abbrev-ref HEAD)"
 npm run check:dist     # fails closed on anything not intended to be public
 ```
 
 Node 18+; CI uses Node 22. `npm ci` installs `vite` (a devDependency), which is
 expected — the build needs it, the served site does not.
+
+`SOURCE_DATE_EPOCH` is what makes a release reproducible: the commit time goes
+into the manifest instead of a wall clock, so two builds of the same commit
+produce byte-identical archives and therefore the same sha256. Without it the
+build still works and still deploys correctly — the digest is computed and
+verified in the same run either way — but it is no longer reproducible.
 
 ## 3. Artifact layout
 
