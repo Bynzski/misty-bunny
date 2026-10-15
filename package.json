@@ -17,6 +17,7 @@
     "walk": "node tools/walkcheck.mjs",
     "gaps": "node tools/gaps.mjs",
     "mechanisms": "node tools/mechanisms.mjs",
+    "wheels": "node tools/wheels.mjs",
     "tour": "node tools/tour.mjs",
     "scans": "node tools/export-scans.mjs",
     "reader": "node tools/reader-shots.mjs",

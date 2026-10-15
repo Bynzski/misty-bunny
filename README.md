@@ -206,6 +206,24 @@ noticed. Similarly, the movement code had the forward vector negated, and the on
 tests that exercised it asked *whether* the player had climbed a stair, never
 *which way*.
 
+**A cylinder's pitch is a chord, not a circumference.** The odometer drums were
+built as ten flat cards round a barrel, at 145 mm and 120 mm wide, on barrels whose
+chordal pitch was 117 mm and 96 mm — so every card sheared through its neighbours,
+and the bezel in front was a third wider again, which meant it was carefully framed
+to show you the next figure as well as this one. Neither error is visible from
+anywhere but head on, and at a glance it just reads as "the numbers are hard to
+make out". The figures now live on a single wrapped sleeve, so the spacing is the
+drawing's problem, and the radius is derived *from* the figure width, which makes a
+figure wider than its own pitch a thing you cannot express.
+
+**A bloom threshold is in linear light.** The pass runs before the tone map, where
+an ordinarily lit surface sits around 0.2–1.0 and only genuinely hot things go past
+1. Ours was set to 0.95, which meant most lit surfaces in the level bloomed, and the
+bloom radius then smeared that over anything small and dark standing near a bright
+wall. The figures on the drums were the worst case: near-black ground, a hand's
+width from polished brass, and therefore the first thing in the level to stop being
+readable when the lantern was on.
+
 ---
 
 ## Tools
@@ -218,6 +236,7 @@ npm run smoke -- --shots   # ...and writes screenshots to shots/
 npm run tour           # photographs 24 vantage points around the level
 npm run reader         # photographs the reading view
 npm run scans          # renders every clue page to shots/scans/ for proofing
+npm run wheels         # photographs the odometer drums at reading distance
 ```
 
 `smoke.mjs` is the interesting one. It asserts that all nine clues can be reached
@@ -228,6 +247,15 @@ trench and the walls hold; that **the meridian passage can be walked to the dome
 and then it solves all three puzzles in order through the real UI, clicking the
 same buttons a player clicks, and waits for the ending to arrive. It also fails on
 any uncaught error or THREE warning.
+
+`wheels.mjs` exists because the drums are the one prop the player is asked to read
+at a glance rather than examine, and a legible panel in the UI can still be an
+illegible figure on a brass barrel. It sets the drums to distinct figures — ten
+zeroes cannot show whether the drum turned at all — and photographs them from
+several distances, lit and with the lantern shuttered, because the numbers are
+meant to be readable in the room's own light. `--zoom` renders large and shoots a
+crop, which is the only way to tell *the figure is blurred* from *the figure is
+four pixels tall*.
 
 It drives a real GPU through Vulkan. Without one, Chrome silently falls back to a
 software rasteriser that runs this level at under 2 fps and turns every timed wait
@@ -286,6 +314,7 @@ tools/
   reader-shots.mjs      photographs the reading view
   export-scans.mjs      renders every clue page for proofing
   diag.mjs              one-off: render a vantage with parts of the scene disabled
+  wheels.mjs            photographs the odometer drums at reading distance
 ```
 
 Collision is 2D: the level is a union of convex polygons each with a floor-height

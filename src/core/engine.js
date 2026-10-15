@@ -265,8 +265,15 @@ export function createEngine(canvas, { post = true } = {}) {
     gtao.normalMaterial.side = THREE.DoubleSide;
     composer.addPass(gtao);
 
+    // Threshold is in *linear* HDR, not in display values: this pass runs
+    // before the tone map, where an ordinarily lit surface sits around 0.2–1.0
+    // and only genuinely hot things — flame, a specular hit, a lit figure —
+    // go past 1. At 0.95 the pass was blooming almost every lit surface in the
+    // level, and the bloom radius then smeared that over anything dark and
+    // small sitting near a bright wall. The figures on the drums were the
+    // worst of it: near-black ground, a hand's width from polished brass.
     const bloom = new UnrealBloomPass(
-      new THREE.Vector2(innerWidth, innerHeight), 0.26, 0.62, 0.95,
+      new THREE.Vector2(innerWidth, innerHeight), 0.26, 0.62, 1.6,
     );
     composer.addPass(bloom);
 

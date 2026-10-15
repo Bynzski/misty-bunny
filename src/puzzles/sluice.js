@@ -3,7 +3,7 @@
  */
 import * as THREE from 'three';
 import { box, cyl, torus, chain } from '../art/builders.js';
-import { makeDigitWheel } from './wheels.js';
+import { digitRow } from './wheels.js';
 import { SOLUTIONS } from '../clues.js';
 
 export function buildSluice(ctx) {
@@ -56,13 +56,14 @@ export function buildSluice(ctx) {
   for (const sy of [-0.39, 0.39]) plate.add(box(1.86, 0.08, 0.08, M.brassDark, 0, sy, 0.02));
 
   const wheels = [];
-  const XS = [-0.55, 0, 0.55];
-  XS.forEach((x, i) => {
-    const w = makeDigitWheel(M, { radius: 0.19, faceW: 0.145, faceH: 0.165, depth: 0.26 });
-    w.position.set(x, 0.02, 0.11);
-    plate.add(w);
-    wheels.push(w);
-  });
+  {
+    // The row pitches itself off the drum's own width, so the three wheels
+    // cannot collide however the figure size is retuned.
+    const row = digitRow(M, 3, { cellW: 0.132, gap: 0.09 });
+    row.position.set(0, 0.02, 0.11);
+    plate.add(row);
+    wheels.push(...row.userData.wheels);
+  }
 
   /* ---------------- winch and chain above the gate ---------------- */
   {

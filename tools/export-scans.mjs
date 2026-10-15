@@ -33,6 +33,21 @@ for (const id of ids) {
   console.log('wrote', id);
 }
 
+// The figures on an odometer drum are drawn the same way and proofed the same
+// way. One strip carries all ten, so the spacing is visible in a way it never
+// is once the strip is wrapped round a barrel.
+{
+  const url = await page.evaluate(() => {
+    const t = window.__meridian.digitBandTexture(10, { cellPx: 168, aspect: 0.884 });
+    const c = document.createElement('canvas');
+    c.width = t.image.width; c.height = t.image.height;
+    c.getContext('2d').drawImage(t.image, 0, 0);
+    return c.toDataURL('image/png');
+  });
+  writeFileSync(`${OUT}/digitBand.png`, Buffer.from(url.split(',')[1], 'base64'));
+  console.log('wrote digitBand');
+}
+
 // report where the ink actually lands on each page
 for (const id of ids) {
   const bands = await page.evaluate((i) => {

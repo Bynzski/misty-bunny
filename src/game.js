@@ -20,7 +20,7 @@ import { buildSluice } from './puzzles/sluice.js';
 import { buildOrrery } from './puzzles/orrery.js';
 import { buildVault } from './puzzles/lens.js';
 import { OBJECTIVES } from './clues.js';
-import { clueCanvasUrl, clueCanvas } from './art/textures.js';
+import { clueCanvasUrl, clueCanvas, digitBandTexture } from './art/textures.js';
 
 const $ = (s) => document.querySelector(s);
 
@@ -273,6 +273,6 @@ export async function createGame() {
 
   return { scene, renderer, camera, player, ui, reader, world, audio, input, walk, I, engine,
            clueCanvasUrl, post, countTriangles,
-           __canvasOf: clueCanvas,
+           __canvasOf: clueCanvas, digitBandTexture,
            parts: { sluice, orrery, vault } };
 }

@@ -776,34 +776,112 @@ export function waterNormal({ size = 512, seed = 33 } = {}) {
 /* ------------------------------------------------------------------ *
  *  small utility textures
  * ------------------------------------------------------------------ */
-export function digitTexture(n, { w = 128, h = 128 } = {}) {
+/**
+ * The figures on an odometer drum, drawn as a single strip that wraps the
+ * barrel once.
+ *
+ * Ten separate flat cards cannot be taped round a ten-figure drum: a card of
+ * width w wants a chordal pitch of at least w, and the pitch of a drum is
+ * 2r·sin(π/10) — 0.618r, not r. A 145 mm card on a 117 mm pitch does not sit
+ * beside its neighbour, it goes through it. One sleeve has no such problem,
+ * because the spacing is the drawing's job and the canvas does the arithmetic.
+ *
+ * Each figure is kept well inside its own cell, which is what lets a bezel
+ * crop the edges of the figure in front of it without ever uncovering the one
+ * behind. A real counter does the same thing, and the margins are what buy it.
+ *
+ * `aspect` is the cell's width divided by the band's height, so the figures are
+ * not stretched when the barrel is not round.
+ *
+ * The returned texture carries a half-cell wrap offset, which is the whole
+ * reason this function owns the spacing rather than leaving it to the barrel.
+ * Figure n is drawn at u = (n + 0.5)/digits, because that is where the centre
+ * of the nth cell of a strip of cells falls — but the barrel puts u = 0 at the
+ * front, and turning the drum by n steps brings u = n/digits there, not
+ * u = (n + 0.5)/digits. Uncorrected, every figure is presented half a cell off
+ * the front, which puts it behind the edge of the window rather than in it.
+ */
+export function digitBandTexture(digits = 10, { cellPx = 160, aspect = 0.86 } = {}) {
+  const w = cellPx * digits;
+  const h = Math.round(cellPx / aspect);
   const { c, x } = mk(w, h);
-  x.fillStyle = '#0c0d0f'; x.fillRect(0, 0, w, h);
-  x.fillStyle = '#e8d08a';
-  x.font = `bold ${h * 0.74}px ${MONO}`;
-  x.textAlign = 'center'; x.textBaseline = 'middle';
-  x.shadowColor = 'rgba(230,200,120,.7)'; x.shadowBlur = 14;
-  x.fillText(String(n), w / 2, h * 0.53);
-  x.shadowBlur = 0;
-  const t = new THREE.CanvasTexture(c);
-  t.colorSpace = THREE.SRGBColorSpace;
-  return t;
-}
+  const cw = w / digits;
 
-/** Engraved brass ring band used by the combination wheels. */
-export function wheelBandTexture(count, { size = 512 } = {}) {
-  const { c, x, w, h } = mk(size, size / 4);
-  x.fillStyle = '#191b1e'; x.fillRect(0, 0, w, h);
-  const cw = w / count;
-  for (let i = 0; i < count; i++) {
-    const g = x.createLinearGradient(i * cw, 0, i * cw + cw, 0);
-    g.addColorStop(0, '#3a3f45'); g.addColorStop(0.5, '#1a1c20'); g.addColorStop(1, '#3a3f45');
-    x.fillStyle = g;
-    x.fillRect(i * cw + 1, 0, cw - 2, h);
+  // The ground has to stay dark under every light in the level. This band sits
+  // inside a brass bezel a hand's width from a lantern, and a mid-grey ground
+  // is the first thing the bloom finds and the last thing the eye can read a
+  // figure against.
+  const ground = x.createLinearGradient(0, 0, 0, h);
+  ground.addColorStop(0, '#1b1a17');
+  ground.addColorStop(0.30, '#121110');
+  ground.addColorStop(0.72, '#0e0d0c');
+  ground.addColorStop(1, '#191714');
+  x.fillStyle = ground;
+  x.fillRect(0, 0, w, h);
+
+  // one recessed panel per cell, and a bright rule on each division, so the
+  // drum reads as ten counted places rather than as a smear of numerals
+  for (let i = 0; i < digits; i++) {
+    const x0 = i * cw;
+    x.fillStyle = 'rgba(0,0,0,.34)';
+    x.fillRect(x0 + cw * 0.06, 2, cw * 0.88, h - 4);
+    x.fillStyle = 'rgba(232,208,138,.30)';
+    x.fillRect(x0, 0, Math.max(1, cellPx * 0.008), h);
+    x.fillStyle = 'rgba(232,208,138,.10)';
+    x.fillRect(x0 + cw * 0.06, 2, cw * 0.88, Math.max(1, h * 0.006));
   }
+
+  // The figure, sized off its own measured ink box rather than off the font
+  // size — the advance width of a monospace digit and the width of the mark it
+  // draws are not the same thing, and only one of them is what the eye reads.
+  const targetW = cw * 0.72;
+  const targetH = h * 0.78;
+  x.textAlign = 'center';
+  x.textBaseline = 'middle';
+
+  for (let i = 0; i < digits; i++) {
+    const ch = String(i);
+    const cx = i * cw + cw / 2;
+    const cy = h / 2;
+
+    x.save();
+    x.translate(cx, cy);
+
+    x.font = `bold ${cellPx}px ${MONO}`;
+    const m = x.measureText(ch);
+    const iw = (m.actualBoundingBoxLeft || 0) + (m.actualBoundingBoxRight || 0);
+    const ih = (m.actualBoundingBoxAscent || 0) + (m.actualBoundingBoxDescent || 0);
+    const s = Math.min(targetW / iw, targetH / ih);
+    x.scale(s, s);
+
+    // glow first, so the figure keeps a halo when the band is in shadow
+    x.shadowColor = 'rgba(236,206,132,.55)';
+    x.shadowBlur = cellPx * 0.20;
+    x.fillStyle = 'rgba(226,198,128,.42)';
+    x.fillText(ch, 0, 0);
+    x.shadowBlur = 0;
+
+    // the cut itself: a dark bevel below, a lit bevel above
+    x.fillStyle = 'rgba(0,0,0,.85)';
+    x.fillText(ch, 0, cellPx * 0.022);
+    const face = x.createLinearGradient(0, -ih / 2, 0, ih / 2);
+    face.addColorStop(0, '#fff3d2');
+    face.addColorStop(0.55, '#f0d89c');
+    face.addColorStop(1, '#cfa960');
+    x.fillStyle = face;
+    x.fillText(ch, 0, 0);
+
+    x.restore();
+  }
+
   const t = new THREE.CanvasTexture(c);
   t.colorSpace = THREE.SRGBColorSpace;
   t.wrapS = THREE.RepeatWrapping;
+  // see above: figure n is presented at the window by turning the drum n steps
+  t.offset.x = 0.5 / digits;
+  // the band is seen almost edge-on for most of its travel, so the mip chain
+  // is what the eye actually reads for two thirds of every turn
+  t.anisotropy = 16;
   return t;
 }
 

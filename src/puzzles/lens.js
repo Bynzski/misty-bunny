@@ -3,7 +3,7 @@
  */
 import * as THREE from 'three';
 import { box, cyl, torus, sphere, pipe } from '../art/builders.js';
-import { makeDigitWheel } from './wheels.js';
+import { digitRow } from './wheels.js';
 import { SOLUTIONS } from '../clues.js';
 
 export function buildVault(ctx) {
@@ -47,17 +47,20 @@ export function buildVault(ctx) {
     r.rotation.x = Math.PI / 2; r.position.y = y;
     housing.add(r);
   }
-  const facePlate = box(1.42, 0.66, 0.12, M.brass, 0, 0, 0.78);
+  // Four figures, so the plate has to be wide; it already overhangs the
+  // housing's drum on either side, and a narrower figure would only make the
+  // year harder to read at the one distance the player ever stands at it.
+  const facePlate = box(1.66, 0.48, 0.12, M.brass, 0, 0, 0.78);
   housing.add(facePlate);
-  housing.add(box(1.56, 0.78, 0.06, M.brassDark, 0, 0, 0.73));
+  housing.add(box(1.74, 0.56, 0.06, M.brassDark, 0, 0, 0.73));
 
   const wheels = [];
-  [-0.51, -0.17, 0.17, 0.51].forEach((x, i) => {
-    const w = makeDigitWheel(M, { radius: 0.155, faceW: 0.12, faceH: 0.135, depth: 0.22 });
-    w.position.set(x, 0.01, 0.86);
-    housing.add(w);
-    wheels.push(w);
-  });
+  {
+    const row = digitRow(M, 4, { cellW: 0.095, gap: 0.02 });
+    row.position.set(0, 0.01, 0.88);
+    housing.add(row);
+    wheels.push(...row.userData.wheels);
+  }
 
   /* ---------------- the optic ---------------- */
   const optic = new THREE.Group();
